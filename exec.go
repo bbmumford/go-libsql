@@ -58,6 +58,9 @@ func (c *conn) ExecContext(ctx context.Context, query string, args []sqldriver.N
 // execOne runs one statement and reads the connection's change count and
 // last row id after it.
 func (c *conn) execOne(query string, args []sqldriver.NamedValue) (sqldriver.Result, error) {
+	if c.local {
+		return c.execLocal(query, args)
+	}
 	rows, err := c.execute(query, args, true)
 	if err != nil {
 		return nil, err
@@ -67,6 +70,36 @@ func (c *conn) execOne(query string, args []sqldriver.NamedValue) (sqldriver.Res
 	if rows != nil {
 		C.libsql_free_rows(rows)
 	}
+	return execResult{id, changes}, nil
+}
+
+// execLocal runs one statement on a connection with no primary through the
+// row-returning path and steps through every row it yields, discarding them.
+// The C binding's execute path fails a local statement that yields a row
+// ("Execute returned rows") after the statement has already taken effect, so
+// PRAGMA journal_mode=WAL, PRAGMA busy_timeout=... and INSERT ... RETURNING
+// sent through Exec reported an error for work that was done.
+func (c *conn) execLocal(query string, args []sqldriver.NamedValue) (sqldriver.Result, error) {
+	rows, err := c.execute(query, args, false)
+	if err != nil {
+		return nil, err
+	}
+	if rows != nil {
+		defer C.libsql_free_rows(rows)
+		for {
+			var row C.libsql_row_t
+			var errMsg *C.char
+			if status := C.libsql_next_row(rows, &row, &errMsg); status != 0 {
+				return nil, libsqlError(fmt.Sprint("failed to execute query ", query), status, errMsg)
+			}
+			if row == nil {
+				break
+			}
+			C.libsql_free_row(row)
+		}
+	}
+	id := int64(C.libsql_last_insert_rowid(c.nativePtr))
+	changes := int64(C.libsql_changes(c.nativePtr))
 	return execResult{id, changes}, nil
 }
 

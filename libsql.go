@@ -249,7 +249,7 @@ func openLocalConnector(dbPath string) (*Connector, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Connector{nativeDbPtr: nativeDbPtr}, nil
+	return &Connector{nativeDbPtr: nativeDbPtr, local: true}, nil
 }
 
 func openRemoteConnector(primaryUrl, authToken, remoteEncryptionKey string) (*Connector, error) {
@@ -300,6 +300,9 @@ type Connector struct {
 	nativeDbPtr C.libsql_database_t
 	closeCh     chan<- struct{}
 	closeAckCh  <-chan struct{}
+	// local marks a database with no primary (file: and :memory: opens);
+	// conn.execOne reads it through conn.local.
+	local bool
 }
 
 // Deprecated: Sync is deprecated and will be removed in a future release. Use the `tursogo` package instead. Learn more: https://tur.so/newsync
@@ -326,7 +329,7 @@ func (c *Connector) Connect(ctx context.Context) (sqldriver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &conn{nativePtr: nativeConnPtr}, nil
+	return &conn{nativePtr: nativeConnPtr, local: c.local}, nil
 }
 
 func (c *Connector) Driver() sqldriver.Driver {
@@ -444,6 +447,7 @@ func libsqlConnect(db C.libsql_database_t) (C.libsql_connection_t, error) {
 
 type conn struct {
 	nativePtr C.libsql_connection_t
+	local     bool
 }
 
 func (c *conn) Prepare(query string) (sqldriver.Stmt, error) {
