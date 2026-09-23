@@ -17,6 +17,7 @@ import (
 // the zero value, the upstream behaviour.
 type connOptions struct {
 	immediateTransactions bool
+	rawText               bool
 }
 
 func (c *config) connOptions() connOptions {
@@ -24,7 +25,26 @@ func (c *config) connOptions() connOptions {
 	if c.immediateTransactions != nil {
 		o.immediateTransactions = *c.immediateTransactions
 	}
+	if c.rawText != nil {
+		o.rawText = *c.rawText
+	}
 	return o
+}
+
+// WithRawText(true) makes rows.Next return every TEXT value as a string.
+// Without it a TEXT value that parses as one of ten date and time layouts
+// (RFC 3339, "2006-01-02 15:04:05", "2006-01-02", ...) is returned as a
+// time.Time in UTC, so a column holding an identifier, a version or a user
+// string that happens to look like a date comes back as a different type,
+// and scanning it into a string yields the value reformatted as RFC 3339.
+func WithRawText(raw bool) Option {
+	return option(func(o *config) error {
+		if o.rawText != nil {
+			return errors.New("raw text already set")
+		}
+		o.rawText = &raw
+		return nil
+	})
 }
 
 // WithImmediateTransactions(true) makes BeginTx open every transaction that

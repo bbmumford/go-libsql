@@ -61,6 +61,7 @@ type config struct {
 	queryOnly   *bool
 	// Set by the connection options in conn_options.go, for every connector.
 	immediateTransactions *bool
+	rawText               *bool
 }
 
 type Option interface {
@@ -773,9 +774,9 @@ const (
 	TYPE_NULL
 )
 
-func newRows(nativePtr C.libsql_rows_t) (*rows, error) {
+func newRows(nativePtr C.libsql_rows_t, rawText bool) (*rows, error) {
 	if nativePtr == nil {
-		return &rows{nil, nil}, nil
+		return &rows{rawText: rawText}, nil
 	}
 	columnCount := int(C.libsql_column_count(nativePtr))
 	columns := make([]string, columnCount)
@@ -789,12 +790,14 @@ func newRows(nativePtr C.libsql_rows_t) (*rows, error) {
 		columns[i] = C.GoString(ptr)
 		C.libsql_free_string(ptr)
 	}
-	return &rows{nativePtr, columns}, nil
+	return &rows{nativePtr: nativePtr, columnNames: columns, rawText: rawText}, nil
 }
 
 type rows struct {
 	nativePtr   C.libsql_rows_t
 	columnNames []string
+	// rawText is connOptions.rawText of the conn that ran the query.
+	rawText bool
 }
 
 func (r *rows) Columns() []string {
@@ -875,6 +878,10 @@ Outerloop:
 			}
 			str := C.GoString(ptr)
 			C.libsql_free_string(ptr)
+			if r.rawText {
+				dest[i] = str
+				continue
+			}
 			for _, format := range []string{
 				time.RFC3339Nano,
 				"2006-01-02 15:04:05.999999999-07:00",
@@ -903,5 +910,5 @@ func (c *conn) QueryContext(ctx context.Context, query string, args []sqldriver.
 	if err != nil {
 		return nil, err
 	}
-	return newRows(rowsNativePtr)
+	return newRows(rowsNativePtr, c.opts.rawText)
 }
