@@ -67,7 +67,8 @@ type localSetup struct {
 // here and again at every connect, so a configured key never guards a
 // plaintext file. A new file is created encrypted at its first write.
 //
-// path is a filesystem path, not a file: URI. The replica options are
+// path is a filesystem path, not a file: URI. The connection options in
+// conn_options.go apply as they do to replicas; the replica options are
 // refused.
 func NewLocalConnector(path string, opts ...Option) (*Connector, error) {
 	if path == "" || strings.HasPrefix(path, "file:") || strings.HasPrefix(path, ":memory:") {
@@ -103,7 +104,7 @@ func NewLocalConnector(path string, opts ...Option) (*Connector, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Connector{nativeDbPtr: nativeDbPtr, local: true, setup: setup}, nil
+	return &Connector{nativeDbPtr: nativeDbPtr, local: true, setup: setup, opts: cfg.connOptions()}, nil
 }
 
 // WithKey sets the 32-byte key of a NewLocalConnector file.

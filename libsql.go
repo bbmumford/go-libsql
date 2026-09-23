@@ -59,6 +59,8 @@ type config struct {
 	localKey    []byte
 	busyTimeout *time.Duration
 	queryOnly   *bool
+	// Set by the connection options in conn_options.go, for every connector.
+	immediateTransactions *bool
 }
 
 type Option interface {
@@ -169,7 +171,12 @@ func NewEmbeddedReplicaConnector(dbPath string, primaryUrl string, opts ...Optio
 	if config.syncInterval != nil {
 		syncInterval = *config.syncInterval
 	}
-	return openSyncConnector(dbPath, primaryUrl, authToken, readYourWrites, encryptionKey, remoteEncryptionKey, syncInterval, false)
+	connector, err := openSyncConnector(dbPath, primaryUrl, authToken, readYourWrites, encryptionKey, remoteEncryptionKey, syncInterval, false)
+	if err != nil {
+		return nil, err
+	}
+	connector.opts = config.connOptions()
+	return connector, nil
 }
 
 func NewSyncedDatabaseConnector(dbPath string, primaryUrl string, opts ...Option) (*Connector, error) {
@@ -206,7 +213,12 @@ func NewSyncedDatabaseConnector(dbPath string, primaryUrl string, opts ...Option
 	if config.syncInterval != nil {
 		syncInterval = *config.syncInterval
 	}
-	return openSyncConnector(dbPath, primaryUrl, authToken, readYourWrites, encryptionKey, remoteEncryptionKey, syncInterval, true)
+	connector, err := openSyncConnector(dbPath, primaryUrl, authToken, readYourWrites, encryptionKey, remoteEncryptionKey, syncInterval, true)
+	if err != nil {
+		return nil, err
+	}
+	connector.opts = config.connOptions()
+	return connector, nil
 }
 
 type driver struct{}
@@ -315,6 +327,8 @@ type Connector struct {
 	local bool
 	// setup prepares every connection of a NewLocalConnector; nil otherwise.
 	setup *localSetup
+	// opts is copied into every conn Connect makes.
+	opts connOptions
 }
 
 // Deprecated: Sync is deprecated and will be removed in a future release. Use the `tursogo` package instead. Learn more: https://tur.so/newsync
@@ -341,7 +355,7 @@ func (c *Connector) Connect(ctx context.Context) (sqldriver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	cn := &conn{nativePtr: nativeConnPtr, local: c.local}
+	cn := &conn{nativePtr: nativeConnPtr, local: c.local, opts: c.opts}
 	if c.setup != nil {
 		if err := c.setup.prepare(cn); err != nil {
 			C.libsql_disconnect(nativeConnPtr)
@@ -467,6 +481,7 @@ func libsqlConnect(db C.libsql_database_t) (C.libsql_connection_t, error) {
 type conn struct {
 	nativePtr C.libsql_connection_t
 	local     bool
+	opts      connOptions
 }
 
 func (c *conn) Prepare(query string) (sqldriver.Stmt, error) {
@@ -578,13 +593,11 @@ func (c *conn) PrepareContext(ctx context.Context, query string) (sqldriver.Stmt
 }
 
 func (c *conn) BeginTx(ctx context.Context, opts sqldriver.TxOptions) (sqldriver.Tx, error) {
-	if opts.ReadOnly {
-		return nil, fmt.Errorf("read only transactions are not supported")
+	begin, err := c.beginStatement(opts)
+	if err != nil {
+		return nil, err
 	}
-	if opts.Isolation != sqldriver.IsolationLevel(sql.LevelDefault) {
-		return nil, fmt.Errorf("isolation level %d is not supported", opts.Isolation)
-	}
-	_, err := c.ExecContext(ctx, "BEGIN", nil)
+	_, err = c.ExecContext(ctx, begin, nil)
 	if err != nil {
 		return nil, err
 	}

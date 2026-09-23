@@ -1,0 +1,73 @@
+//go:build cgo
+// +build cgo
+
+package libsql
+
+import (
+	"database/sql"
+	sqldriver "database/sql/driver"
+	"errors"
+	"fmt"
+)
+
+// connOptions are the per-connection behaviours set by the options in this
+// file. NewEmbeddedReplicaConnector, NewSyncedDatabaseConnector and
+// NewLocalConnector store them on the Connector, and Connector.Connect copies
+// them into every conn. Connectors from sql.Open take no options and keep
+// the zero value, the upstream behaviour.
+type connOptions struct {
+	immediateTransactions bool
+}
+
+func (c *config) connOptions() connOptions {
+	var o connOptions
+	if c.immediateTransactions != nil {
+		o.immediateTransactions = *c.immediateTransactions
+	}
+	return o
+}
+
+// WithImmediateTransactions(true) makes BeginTx open every transaction that
+// can write with BEGIN IMMEDIATE, which takes the write lock (on a replica,
+// the primary's) before the first statement. LevelSerializable is accepted
+// and means the same; a ReadOnly transaction opens with BEGIN.
+//
+// Without it BeginTx sends a deferred BEGIN, which takes the write lock only
+// at the first write: two replicas that each read a row and then update it
+// inside a transaction either fail with "database is locked" or lose one of
+// the updates, and on a local file a transaction that has read can fail its
+// first write with "database is locked" while another connection writes,
+// without waiting out the busy timeout (SQLite skips the busy handler where
+// waiting could deadlock).
+func WithImmediateTransactions(immediate bool) Option {
+	return option(func(o *config) error {
+		if o.immediateTransactions != nil {
+			return errors.New("immediate transactions already set")
+		}
+		o.immediateTransactions = &immediate
+		return nil
+	})
+}
+
+// beginStatement is the statement BeginTx sends for opts. Without
+// WithImmediateTransactions it keeps the upstream rules: BEGIN, with
+// ReadOnly and every isolation level other than the default refused.
+func (c *conn) beginStatement(opts sqldriver.TxOptions) (string, error) {
+	level := sql.IsolationLevel(opts.Isolation)
+	if !c.opts.immediateTransactions {
+		if opts.ReadOnly {
+			return "", errors.New("read only transactions are not supported")
+		}
+		if level != sql.LevelDefault {
+			return "", fmt.Errorf("isolation level %d is not supported", opts.Isolation)
+		}
+		return "BEGIN", nil
+	}
+	if level != sql.LevelDefault && level != sql.LevelSerializable {
+		return "", fmt.Errorf("isolation level %d is not supported", opts.Isolation)
+	}
+	if opts.ReadOnly {
+		return "BEGIN", nil
+	}
+	return "BEGIN IMMEDIATE", nil
+}

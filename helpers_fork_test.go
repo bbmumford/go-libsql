@@ -7,8 +7,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,6 +37,30 @@ func primaryForTest(t *testing.T) (url, token string) {
 		t.Skip("LIBSQL_PRIMARY_URL is not set")
 	}
 	return url, os.Getenv("LIBSQL_AUTH_TOKEN")
+}
+
+// skipOnSqldBefore024 skips a test that needs sqld 0.24 or later when the test
+// primary reports an older sqld on /version. sqld 0.23.0 never answers a
+// statement inside a replica's BEGIN IMMEDIATE transaction while a second
+// replica waits in its own BEGIN IMMEDIATE, so the test would hang rather
+// than fail. A primary without /version is not skipped.
+func skipOnSqldBefore024(t *testing.T) {
+	t.Helper()
+	url, _ := primaryForTest(t)
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(strings.TrimSuffix(url, "/") + "/version")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(string(body), "sqld %d.%d.%d", &major, &minor, &patch); err != nil {
+		return
+	}
+	if major == 0 && minor < 24 {
+		t.Skipf("primary is %s; this test needs sqld 0.24 or later", strings.TrimSpace(string(body)))
+	}
 }
 
 // openReplicaForTest opens an embedded replica of the test primary at path
