@@ -38,8 +38,15 @@ import (
 	"github.com/libsql/sqlite-antlr4-parser/sqliteparserutils"
 )
 
+// DriverName is the database/sql driver name this package registers, for
+// sql.Open callers that use the URL forms driver.OpenConnector accepts.
+// It is not "libsql" because github.com/tursodatabase/libsql-client-go
+// registers that name, and sql.Register panics at init when one binary links
+// two packages registering the same name.
+const DriverName = "libsql-cgo"
+
 func init() {
-	sql.Register("libsql", driver{})
+	sql.Register(DriverName, driver{})
 }
 
 type config struct {

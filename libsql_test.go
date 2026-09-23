@@ -43,7 +43,7 @@ func getRemoteDb(t T) *Database {
 		return nil
 	}
 	authToken := os.Getenv("LIBSQL_AUTH_TOKEN")
-	db, err := sql.Open("libsql", primaryUrl+"?authToken="+authToken)
+	db, err := sql.Open("libsql-cgo", primaryUrl+"?authToken="+authToken)
 	t.FatalOnError(err)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(func() {
@@ -1098,7 +1098,7 @@ func runFileTest(t *testing.T, test func(*testing.T, *sql.DB)) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	db, err := sql.Open("libsql", "file:"+dir+"/test.db")
+	db, err := sql.Open("libsql-cgo", "file:"+dir+"/test.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1114,7 +1114,7 @@ func runMemoryAndFileTests(t *testing.T, test func(*testing.T, *sql.DB)) {
 	t.Parallel()
 	t.Run("Memory", func(t *testing.T) {
 		t.Parallel()
-		db, err := sql.Open("libsql", ":memory:")
+		db, err := sql.Open("libsql-cgo", ":memory:")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1132,7 +1132,7 @@ func runMemoryAndFileTests(t *testing.T, test func(*testing.T, *sql.DB)) {
 
 func TestErrorNonUtf8URL(t *testing.T) {
 	t.Parallel()
-	db, err := sql.Open("libsql", "file:a\xc5z")
+	db, err := sql.Open("libsql-cgo", "file:a\xc5z")
 	if err == nil {
 		defer func() {
 			if err := db.Close(); err != nil {
@@ -1149,7 +1149,7 @@ func TestErrorNonUtf8URL(t *testing.T) {
 func TestErrorWrongURL(t *testing.T) {
 	t.Skip("Does not work with v2")
 	t.Parallel()
-	db, err := sql.Open("libsql", "http://example.com/test")
+	db, err := sql.Open("libsql-cgo", "http://example.com/test")
 	if err == nil {
 		defer func() {
 			if err := db.Close(); err != nil {
@@ -1165,7 +1165,7 @@ func TestErrorWrongURL(t *testing.T) {
 
 func TestErrorCanNotConnect(t *testing.T) {
 	t.Parallel()
-	db, err := sql.Open("libsql", "file:/root/test.db")
+	db, err := sql.Open("libsql-cgo", "file:/root/test.db")
 	if err != nil {
 		t.Fatal(err)
 	}

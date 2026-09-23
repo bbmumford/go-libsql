@@ -51,7 +51,7 @@ func run() (err error) {
 	}
 
 	// Open database connection
-	db, err := sql.Open("libsql", dbUrl)
+	db, err := sql.Open("libsql-cgo", dbUrl)
 	if err != nil {
 		return fmt.Errorf("error opening cloud db: %w", err)
 	}
