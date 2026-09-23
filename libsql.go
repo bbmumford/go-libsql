@@ -55,6 +55,10 @@ type config struct {
 	encryptionKey       *string
 	remoteEncryptionKey *string
 	syncInterval        *time.Duration
+	// Set only by the NewLocalConnector options in local_connector.go.
+	localKey    []byte
+	busyTimeout *time.Duration
+	queryOnly   *bool
 }
 
 type Option interface {
@@ -142,6 +146,9 @@ func NewEmbeddedReplicaConnector(dbPath string, primaryUrl string, opts ...Optio
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
+	if err := config.refuseLocalOnly(); err != nil {
+		return nil, err
+	}
 	authToken := ""
 	if config.authToken != nil {
 		authToken = *config.authToken
@@ -175,6 +182,9 @@ func NewSyncedDatabaseConnector(dbPath string, primaryUrl string, opts ...Option
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
+	}
+	if err := config.refuseLocalOnly(); err != nil {
+		return nil, err
 	}
 	authToken := ""
 	if config.authToken != nil {
@@ -300,9 +310,11 @@ type Connector struct {
 	nativeDbPtr C.libsql_database_t
 	closeCh     chan<- struct{}
 	closeAckCh  <-chan struct{}
-	// local marks a database with no primary (file: and :memory: opens);
-	// conn.execOne reads it through conn.local.
+	// local marks a database with no primary (file: and :memory: opens and
+	// NewLocalConnector); conn.execOne reads it through conn.local.
 	local bool
+	// setup prepares every connection of a NewLocalConnector; nil otherwise.
+	setup *localSetup
 }
 
 // Deprecated: Sync is deprecated and will be removed in a future release. Use the `tursogo` package instead. Learn more: https://tur.so/newsync
@@ -329,7 +341,14 @@ func (c *Connector) Connect(ctx context.Context) (sqldriver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &conn{nativePtr: nativeConnPtr, local: c.local}, nil
+	cn := &conn{nativePtr: nativeConnPtr, local: c.local}
+	if c.setup != nil {
+		if err := c.setup.prepare(cn); err != nil {
+			C.libsql_disconnect(nativeConnPtr)
+			return nil, err
+		}
+	}
+	return cn, nil
 }
 
 func (c *Connector) Driver() sqldriver.Driver {
