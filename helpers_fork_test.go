@@ -1,0 +1,132 @@
+//go:build cgo
+// +build cgo
+
+package libsql
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// Helpers shared by the tests of the connection behaviours this fork adds.
+// Replica tests read LIBSQL_PRIMARY_URL (and LIBSQL_AUTH_TOKEN when the
+// primary needs one), the variables the upstream suite in libsql_test.go
+// reads, and skip without them.
+
+var uniqueSeq atomic.Int64
+
+// uniqueName returns a table name no other test run against the same primary
+// uses.
+func uniqueName(prefix string) string {
+	return fmt.Sprintf("%s_%d_%d", prefix, time.Now().UnixNano(), uniqueSeq.Add(1))
+}
+
+func primaryForTest(t *testing.T) (url, token string) {
+	t.Helper()
+	url = os.Getenv("LIBSQL_PRIMARY_URL")
+	if url == "" {
+		t.Skip("LIBSQL_PRIMARY_URL is not set")
+	}
+	return url, os.Getenv("LIBSQL_AUTH_TOKEN")
+}
+
+// openReplicaForTest opens an embedded replica of the test primary at path
+// (a new file in a temporary directory when path is empty) and closes it when
+// the test ends.
+func openReplicaForTest(t *testing.T, path string, opts ...Option) (*sql.DB, *Connector) {
+	t.Helper()
+	url, token := primaryForTest(t)
+	if path == "" {
+		path = filepath.Join(t.TempDir(), "replica.db")
+	}
+	if token != "" {
+		opts = append(opts, WithAuthToken(token))
+	}
+	connector, err := NewEmbeddedReplicaConnector(path, url, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := sql.OpenDB(connector)
+	t.Cleanup(func() {
+		db.Close()
+		connector.Close()
+	})
+	return db, connector
+}
+
+// openFileForTest opens a local database file through the registered driver.
+func openFileForTest(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open(DriverName, "file:"+filepath.Join(t.TempDir(), "local.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func mustExec(t *testing.T, db *sql.DB, query string, args ...any) sql.Result {
+	t.Helper()
+	res, err := db.ExecContext(context.Background(), query, args...)
+	if err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return res
+}
+
+func countRows(t *testing.T, db *sql.DB, table string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(), "SELECT count(*) FROM "+table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+func int64Column(t *testing.T, db *sql.DB, query string) []int64 {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), query)
+	if err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func textColumn(t *testing.T, db *sql.DB, query string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), query)
+	if err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v sql.NullString
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, v.String)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
