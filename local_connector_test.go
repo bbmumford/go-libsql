@@ -58,7 +58,7 @@ func TestLocalConnectorKeyedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keyed.db")
 	key := testKey(0)
 
-	// H1: a keyed file is created and written.
+	// A keyed file is created and written.
 	db, err := openLocalForTest(t, path, WithKey(key))
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestLocalConnectorKeyedFile(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('"+localMarker+"')")
 	db.Close()
 
-	// H2: neither the header nor the row is readable on disk.
+	// Neither the header nor the row is readable on disk.
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 {
 		t.Fatalf("read %s: %d bytes, %v", path, len(b), err)
@@ -75,7 +75,7 @@ func TestLocalConnectorKeyedFile(t *testing.T) {
 		t.Fatal("the keyed file holds the plaintext header or row")
 	}
 
-	// H3: the same key reads it back.
+	// The same key reads it back.
 	db, err = openLocalForTest(t, path, WithKey(key))
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestLocalConnectorKeyedFile(t *testing.T) {
 	}
 	db.Close()
 
-	// H4: another key fails when the connection is made, and the error
+	// Another key fails when the connection is made, and the error
 	// carries neither key form.
 	_, err = openLocalForTest(t, path, WithKey(testKey(1)))
 	if err == nil || !strings.Contains(err.Error(), "file is not a database") {
@@ -97,7 +97,7 @@ func TestLocalConnectorKeyedFile(t *testing.T) {
 		}
 	}
 
-	// H5: the hex form of the key opens it, and so does a plain connection
+	// The hex form of the key opens it, and so does a plain connection
 	// keyed with the base64 passphrase, the form a replica keyed
 	// WithEncryption(base64(key)) uses.
 	db, err = openLocalForTest(t, path, WithHexKey(hex.EncodeToString(key)))
@@ -127,6 +127,9 @@ func TestLocalConnectorKeyedFile(t *testing.T) {
 
 	// The cipher reads only the first 32 passphrase bytes, as NewLocalConnector
 	// documents: the first 32 base64 characters open the file, 31 do not.
+	// With no idle connections kept, each prefix keys a new connection rather
+	// than one the previous prefix already keyed and read through.
+	plain.SetMaxIdleConns(0)
 	for _, n := range []int{32, 31} {
 		c, err := plain.Conn(context.Background())
 		if err != nil {
@@ -179,7 +182,7 @@ func openPlainAt(t *testing.T, path string) *sql.DB {
 	return db
 }
 
-// Q1: a query-only connector reads and refuses every write.
+// A query-only connector reads and refuses every write.
 func TestLocalConnectorQueryOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ro.db")
 	key := testKey(3)
@@ -251,6 +254,32 @@ func TestLocalConnectorBusyTimeout(t *testing.T) {
 	}
 	if got := int64Column(t, holder, "SELECT v FROM t"); len(got) != 1 || got[0] != 2 {
 		t.Fatalf("rows = %v, want [2]", got)
+	}
+}
+
+// A keyed connect that meets another connection's exclusive lock past its busy
+// timeout fails with "database is locked" and does not name the key as the
+// cause, so a caller can tell a busy file from one keyed with another key.
+func TestLocalConnectorLockIsNotAWrongKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locked.db")
+	ctx := context.Background()
+	key := testKey(9)
+	holder, err := openLocalForTest(t, path, WithKey(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, holder, "CREATE TABLE t(v)")
+	lock, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if _, err := lock.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = openLocalForTest(t, path, WithKey(key), WithBusyTimeout(0))
+	if err == nil || !strings.Contains(err.Error(), "database is locked") || strings.Contains(err.Error(), "does not open") {
+		t.Fatalf("keyed connect under an exclusive lock: err=%v", err)
 	}
 }
 

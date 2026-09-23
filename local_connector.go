@@ -204,8 +204,12 @@ func (s *localSetup) prepare(c *conn) error {
 		}
 	}
 	if s.passphrase != "" {
+		// The read fails with "file is not a database" under another key and
+		// with "database is locked" when another connection's lock outlasts
+		// the busy timeout; the wrapped engine error names which, so the
+		// message here names only the read.
 		if _, err := c.execLocal("SELECT count(*) FROM sqlite_schema", nil); err != nil {
-			return fmt.Errorf("the key does not open %s: %w", s.path, err)
+			return fmt.Errorf("read the schema of %s with the key applied: %w", s.path, err)
 		}
 	}
 	return nil
