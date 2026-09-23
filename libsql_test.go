@@ -519,6 +519,7 @@ func TestEncryption(tt *testing.T) {
 	t.FatalOnError(err)
 	db := sql.OpenDB(connector)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (id INTEGER PRIMARY KEY, name TEXT)")
 	if err != nil {
 		cancel()
