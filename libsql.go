@@ -591,6 +591,14 @@ func (c *conn) executeNoArgs(query string, exec bool) (C.libsql_rows_t, error) {
 }
 
 func (c *conn) execute(query string, args []sqldriver.NamedValue, exec bool) (C.libsql_rows_t, error) {
+	// The C binding binds by position only, so sql.Named values were bound in
+	// argument order whatever their names (SELECT :b - :a with a=2, b=40 gave
+	// -38). A name is refused rather than bound to the wrong parameter.
+	for _, arg := range args {
+		if arg.Name != "" {
+			return nil, fmt.Errorf("named argument %q is not supported: arguments bind by position", arg.Name)
+		}
+	}
 	if len(args) == 0 {
 		return c.executeNoArgs(query, exec)
 	}
