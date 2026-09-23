@@ -77,8 +77,8 @@ func (c *conn) execOne(query string, args []sqldriver.NamedValue) (sqldriver.Res
 // row-returning path and steps through every row it yields, discarding them.
 // The C binding's execute path fails a local statement that yields a row
 // ("Execute returned rows") after the statement has already taken effect, so
-// PRAGMA journal_mode=WAL, PRAGMA busy_timeout=... and INSERT ... RETURNING
-// sent through Exec reported an error for work that was done.
+// Exec of PRAGMA journal_mode=WAL, PRAGMA busy_timeout=... or INSERT ...
+// RETURNING on that path returns an error for work that is done.
 // NewLocalConnector's per-connection PRAGMAs (localSetup.prepare) run here.
 func (c *conn) execLocal(query string, args []sqldriver.NamedValue) (sqldriver.Result, error) {
 	rows, err := c.execute(query, args, false)

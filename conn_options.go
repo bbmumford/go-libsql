@@ -14,7 +14,7 @@ import (
 // file. NewEmbeddedReplicaConnector, NewSyncedDatabaseConnector and
 // NewLocalConnector store them on the Connector, and Connector.Connect copies
 // them into every conn. Connectors from sql.Open take no options and keep
-// the zero value, the upstream behaviour.
+// the zero value: a deferred BEGIN, and date-like TEXT returned as time.Time.
 type connOptions struct {
 	immediateTransactions bool
 	rawText               bool
@@ -70,8 +70,8 @@ func WithImmediateTransactions(immediate bool) Option {
 }
 
 // beginStatement is the statement BeginTx sends for opts. Without
-// WithImmediateTransactions it keeps the upstream rules: BEGIN, with
-// ReadOnly and every isolation level other than the default refused.
+// WithImmediateTransactions it is BEGIN, and ReadOnly and every isolation
+// level other than the default are refused.
 func (c *conn) beginStatement(opts sqldriver.TxOptions) (string, error) {
 	level := sql.IsolationLevel(opts.Isolation)
 	if !c.opts.immediateTransactions {

@@ -36,7 +36,7 @@ func TestRawTextReplica(t *testing.T) {
 
 // checkRawText stores date-like TEXT values and reads them back into any and
 // into string. With raw every value returns as the stored string; without it
-// the upstream conversion to time.Time stays in force.
+// the date-like ones return as time.Time.
 func checkRawText(t *testing.T, db *sql.DB, table string, raw bool) {
 	t.Helper()
 	ctx := context.Background()

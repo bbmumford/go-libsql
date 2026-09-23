@@ -13,9 +13,8 @@ import (
 
 // clientDriverStub stands in for github.com/tursodatabase/libsql-client-go,
 // which registers the name "libsql". Registering it here makes this test
-// binary link both names, as a host binary that holds replicas and Hrana
-// partition pools does; if this package still registered "libsql", the
-// binary would panic in init before any test ran.
+// binary link both names; were this package to register "libsql" as well,
+// the binary would panic in init before any test ran.
 type clientDriverStub struct{}
 
 var errClientStub = errors.New("client driver stub")

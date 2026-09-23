@@ -17,10 +17,10 @@ import (
 	"time"
 )
 
-// Helpers shared by the tests of the connection behaviours this fork adds.
-// Replica tests read LIBSQL_PRIMARY_URL (and LIBSQL_AUTH_TOKEN when the
-// primary needs one), the variables the upstream suite in libsql_test.go
-// reads, and skip without them.
+// Helpers for the tests of DriverName, multi-statement Exec, named
+// arguments, NewLocalConnector and the connection options. Replica tests read
+// LIBSQL_PRIMARY_URL (and LIBSQL_AUTH_TOKEN when the primary needs one), the
+// variables libsql_test.go reads, and skip without them.
 
 var uniqueSeq atomic.Int64
 
