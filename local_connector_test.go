@@ -283,10 +283,18 @@ func TestLocalConnectorLockIsNotAWrongKey(t *testing.T) {
 	}
 }
 
-// Sixteen goroutines writing through one handle see no "database is locked".
+// Sixteen goroutines writing through one handle see no "database is locked":
+// localSetup.prepare gives every connection database/sql opens the busy
+// timeout, so a writer waits for another's lock instead of failing at once.
+// The timeout is a minute, not the 5 s default TestLocalConnectorOptions pins,
+// because this checks that every connection waits, not how long: in the
+// rollback journal each INSERT, and prepare's keyed sqlite_schema read on a
+// new connection, needs a SHARED lock SQLite refuses while another writer
+// commits, and on Linux the 800 inserts can take longer than 5 s in all, so
+// one writer can wait past the default.
 func TestLocalConnectorConcurrentWriters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stress.db")
-	db, err := openLocalForTest(t, path, WithKey(testKey(5)))
+	db, err := openLocalForTest(t, path, WithKey(testKey(5)), WithBusyTimeout(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
