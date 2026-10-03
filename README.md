@@ -5,10 +5,10 @@ This source repository contains libSQL API bindings for Go.
 
 ## Notice
 This package comes with precompiled native libraries under `lib/`.
-`linux amd64`, `linux arm64`, `darwin amd64` and `darwin arm64` are built from libSQL 0.9.30 by
-`scripts/build-libs.sh` (darwin for macOS 11.0 and later; linux on Debian bookworm, so a binary
-linked on bookworm needs at most GLIBC_2.34). `windows amd64` is an older build the script does not
-produce.
+`linux amd64`, `linux arm64`, `darwin amd64`, `darwin arm64` and `windows amd64` are built from
+libSQL 0.9.30 by `scripts/build-libs.sh` (darwin for macOS 11.0 and later; linux on Debian bookworm,
+so a binary linked on bookworm needs at most GLIBC_2.34; windows for `x86_64-pc-windows-gnu` with
+Debian bookworm's MinGW-w64 toolchain, gcc 12, so a Windows binary links it through a MinGW-w64 gcc).
 
 ## Features
 

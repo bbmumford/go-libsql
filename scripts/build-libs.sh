@@ -5,7 +5,7 @@
 # Consumes: a checkout of github.com/tursodatabase/libsql at LIBSQL_TAG
 # (LIBSQL_SRC); rustup, which installs the toolchain pinned by the checkout's
 # rust-toolchain.toml; the Xcode command-line tools for the darwin targets;
-# docker for the linux targets.
+# docker for the linux and windows targets.
 # Consumed by: the #cgo LDFLAGS lines of libsql.go
 # (-L${SRCDIR}/lib/<goos>_<goarch> -lsql_experimental).
 #
@@ -22,12 +22,18 @@
 #   - linux objects are compiled in a Debian bookworm container so a binary
 #     linking them needs at most GLIBC_2.34 (a trixie build references
 #     GLIBC_2.38+ symbols and fails to load on bookworm).
-#   - Windows is not built here: it needs a MinGW toolchain this script does
-#     not provision, so lib/windows_amd64 is left as it is.
+#   - windows objects are cross-compiled in the same bookworm image with
+#     Debian's MinGW-w64 toolchain for x86_64-pc-windows-gnu, the target
+#     whose archive a cgo link through a MinGW-w64 gcc accepts; the container
+#     paths (/src, /cargo-home, /target) are the only paths it records.
+#   - Both container steps install make: libsql-ffi's build script compiles
+#     SQLite3MultipleCiphers (the encryption feature bindings/c enables)
+#     through cmake's Unix Makefiles generator, and the slim image has no
+#     make, so cmake stops at "CMAKE_MAKE_PROGRAM is not set".
 #
 # Usage:
 #   LIBSQL_SRC=/path/to/libsql scripts/build-libs.sh [step...]
-#   steps: header darwin_arm64 darwin_amd64 linux verify   (default: all)
+#   steps: header darwin_arm64 darwin_amd64 linux windows verify   (default: all)
 set -euo pipefail
 
 LIBSQL_TAG="${LIBSQL_TAG:-libsql-0.9.30}"
@@ -97,7 +103,7 @@ build_linux() {
 		-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/target -e JOBS="$JOBS" \
 		"$LINUX_IMAGE" bash -euc '
 			apt-get update -qq
-			apt-get install -y -qq --no-install-recommends cmake g++ \
+			apt-get install -y -qq --no-install-recommends cmake make g++ \
 				gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross >/dev/null
 			cd /src/bindings/c
 			cargo build --release --locked -j "$JOBS"
@@ -110,6 +116,32 @@ build_linux() {
 	mkdir -p "$REPO/lib/linux_arm64" "$REPO/lib/linux_amd64"
 	cp "$WORK/target-linux/release/libsql_experimental.a" "$REPO/lib/linux_arm64/"
 	cp "$WORK/target-linux/x86_64-unknown-linux-gnu/release/libsql_experimental.a" "$REPO/lib/linux_amd64/"
+}
+
+# The windows_amd64 archive comes from the linux image with Debian's
+# MinGW-w64 cross toolchain, so no Windows host is needed. The crate also
+# builds a cdylib, which needs the MinGW linker even though only the static
+# archive is kept.
+build_windows() {
+	check_disk
+	mkdir -p "$WORK/target-windows"
+	docker run --rm --platform linux/arm64 \
+		-v "$LIBSQL_SRC":/src -v "$CARGO_HOME_DIR":/cargo-home -v "$WORK/target-windows":/target \
+		-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/target -e JOBS="$JOBS" \
+		"$LINUX_IMAGE" bash -euc '
+			apt-get update -qq
+			apt-get install -y -qq --no-install-recommends cmake make \
+				gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 >/dev/null
+			cd /src/bindings/c
+			rustup target add x86_64-pc-windows-gnu
+			CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
+			CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++ \
+			AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
+			CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+				cargo build --release --locked -j "$JOBS" --target x86_64-pc-windows-gnu
+		'
+	mkdir -p "$REPO/lib/windows_amd64"
+	cp "$WORK/target-windows/x86_64-pc-windows-gnu/release/libsql_experimental.a" "$REPO/lib/windows_amd64/"
 }
 
 copy_header() {
@@ -158,7 +190,7 @@ verify() {
 }
 
 steps=("$@")
-[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux verify)
+[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows verify)
 check_tag
 for s in "${steps[@]}"; do
 	case "$s" in
@@ -166,6 +198,7 @@ for s in "${steps[@]}"; do
 	darwin_arm64) build_darwin aarch64-apple-darwin darwin_arm64 ;;
 	darwin_amd64) build_darwin x86_64-apple-darwin darwin_amd64 ;;
 	linux) build_linux ;;
+	windows) build_windows ;;
 	verify) verify ;;
 	*)
 		echo "unknown step $s" >&2
