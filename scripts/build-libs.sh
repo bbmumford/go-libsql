@@ -15,7 +15,9 @@
 #   - Every build-machine path is mapped to a neutral prefix (rustc
 #     --remap-path-prefix, C -ffile-prefix-map), because the libraries are
 #     committed to a repository other people fetch; `verify` fails when a
-#     local path survives in an archive.
+#     local path survives in an archive, and also when any home-directory
+#     path outside CRATE_BUILD_PATHS does, which is a path of whatever
+#     machine produced the file rather than of this one.
 #   - darwin objects are compiled with MACOSX_DEPLOYMENT_TARGET=11.0 so a
 #     worker binary linking them runs on every macOS the worker supports;
 #     `verify` fails on any object whose minimum OS is newer.
@@ -54,6 +56,20 @@ MIN_FREE_GIB="${MIN_FREE_GIB:-6}"
 DATA_VOLUME="${DATA_VOLUME:-/System/Volumes/Data}"
 LINUX_IMAGE="${LINUX_IMAGE:-rust:1.95.0-slim-bookworm}"
 JOBS="${JOBS:-4}"
+
+# HOME_PATH_RE matches an absolute path under a user's home directory, in both
+# spellings an archive's debug and panic strings carry. CRATE_BUILD_PATHS are
+# the ones a crate bindings/c depends on ships inside its own prebuilt objects,
+# so every archive carries them whoever runs the build: ring's pregenerated
+# NASM objects and the toolchain's precompiled compiler_builtins and std.
+# Consumed by verify, which fails on a match outside CRATE_BUILD_PATHS: the
+# remaps of build_darwin and the /src, /cargo-home and /target of build_linux
+# and build_windows leave this machine's home out of every archive they write,
+# so such a path means the file came from another machine's build. A remapped
+# $HOME keeps the dot of the directory under it (/home/.cargo), which a real
+# home path does not have, so the allowance covers the remap target.
+HOME_PATH_RE='([A-Za-z]:\\[A-Za-z0-9_.-]+\\[^ "]*|/Users/[A-Za-z0-9_.-]+/[^ "]*|/home/[A-Za-z0-9_.-]+/[^ "]*|/root/[^ "]*)'
+CRATE_BUILD_PATHS='^(C:\\Users\\b\\p\\ring\\pregenerated\\|C:\\Users\\runneradmin\\\.cargo\\|/Users/runner/|/home/\.)'
 
 check_tag() {
 	local got
@@ -154,7 +170,7 @@ copy_header() {
 }
 
 verify() {
-	local fail=0 a n minos members coff
+	local fail=0 a n minos members coff foreign
 	for a in "$REPO"/lib/*/libsql_experimental.a; do
 		for p in "$LIBSQL_SRC" "$CARGO_HOME_DIR" "$WORK" "$HOME" /private/tmp; do
 			n="$(strings -a "$a" | grep -c -F "$p" || true)"
@@ -163,6 +179,11 @@ verify() {
 				fail=1
 			fi
 		done
+		foreign="$(strings -a "$a" | grep -oE "$HOME_PATH_RE" | grep -vE "$CRATE_BUILD_PATHS" | sort -u || true)"
+		if [ -n "$foreign" ]; then
+			echo "FAIL $a: $(printf '%s\n' "$foreign" | wc -l | tr -d ' ') home-directory paths of another machine, first $(printf '%s\n' "$foreign" | head -1)" >&2
+			fail=1
+		fi
 		case "$a" in
 		*/darwin_*)
 			minos="$(otool -l "$a" | awk '
