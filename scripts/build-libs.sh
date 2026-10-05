@@ -26,6 +26,10 @@
 #     Debian's MinGW-w64 toolchain for x86_64-pc-windows-gnu, the target
 #     whose archive a cgo link through a MinGW-w64 gcc accepts; the container
 #     paths (/src, /cargo-home, /target) are the only paths it records.
+#   - `verify` reads the windows archive with objdump and fails unless every
+#     member is coff-x86-64, because a cargo build that loses the
+#     --target x86_64-pc-windows-gnu of build_windows writes a linux archive
+#     to the same path, which no cgo link through a MinGW-w64 gcc accepts.
 #   - Both container steps install make: libsql-ffi's build script compiles
 #     SQLite3MultipleCiphers (the encryption feature bindings/c enables)
 #     through cmake's Unix Makefiles generator, and the slim image has no
@@ -150,7 +154,7 @@ copy_header() {
 }
 
 verify() {
-	local fail=0 a n minos
+	local fail=0 a n minos members coff
 	for a in "$REPO"/lib/*/libsql_experimental.a; do
 		for p in "$LIBSQL_SRC" "$CARGO_HOME_DIR" "$WORK" "$HOME" /private/tmp; do
 			n="$(strings -a "$a" | grep -c -F "$p" || true)"
@@ -179,6 +183,16 @@ verify() {
 				fail=1
 			fi
 			echo "ok   $a: no glibc > 2.34 symbol references"
+			;;
+		*/windows_*)
+			members="$(objdump -f "$a" 2>/dev/null | grep -c 'file format' || true)"
+			coff="$(objdump -f "$a" 2>/dev/null | grep -c 'file format coff-x86-64' || true)"
+			if [ "$members" = 0 ] || [ "$members" != "$coff" ]; then
+				echo "FAIL $a: $coff of $members members are coff-x86-64" >&2
+				fail=1
+			else
+				echo "ok   $a: $coff members, every one coff-x86-64"
+			fi
 			;;
 		esac
 	done
