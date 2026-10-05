@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestBeginStatement(t *testing.T) {
@@ -101,9 +102,15 @@ func TestImmediateTransactionsLocal(t *testing.T) {
 }
 
 // Read-then-update increments in BeginTx from sixteen goroutines on one
-// local handle all land.
+// local handle all land: localSetup.prepare gives every connection
+// database/sql opens the busy timeout, so a transaction waits for another's
+// lock instead of failing at once. The timeout is a minute, not the 5 s
+// default TestLocalConnectorOptions pins, because this checks that every
+// increment lands, not how long one waits: WithImmediateTransactions makes
+// each BeginTx take the RESERVED lock before it reads, so the sixteen writers
+// serialise through all 400 transactions and one can wait past the default.
 func TestImmediateTransactionsLocalIncrements(t *testing.T) {
-	db, err := openLocalForTest(t, filepath.Join(t.TempDir(), "inc.db"), WithImmediateTransactions(true))
+	db, err := openLocalForTest(t, filepath.Join(t.TempDir(), "inc.db"), WithImmediateTransactions(true), WithBusyTimeout(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
