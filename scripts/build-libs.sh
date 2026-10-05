@@ -32,6 +32,14 @@
 #     member is coff-x86-64, because a cargo build that loses the
 #     --target x86_64-pc-windows-gnu of build_windows writes a linux archive
 #     to the same path, which no cgo link through a MinGW-w64 gcc accepts.
+#   - `verify` fails the same way on a darwin or linux archive whose
+#     architecture is not the one its directory names: the step list hands
+#     build_darwin its rust target and its lib directory as two separate
+#     words, and build_linux copies the container's native output into
+#     lib/linux_arm64, so a swapped pair or a changed docker --platform puts
+#     a sound archive of the other architecture in the directory libsql.go's
+#     #cgo LDFLAGS line selects for that GOOS/GOARCH, where no link accepts
+#     it. The minimum-OS and glibc-symbol checks pass such a file.
 #   - Both container steps install make: libsql-ffi's build script compiles
 #     SQLite3MultipleCiphers (the encryption feature bindings/c enables)
 #     through cmake's Unix Makefiles generator, and the slim image has no
@@ -170,7 +178,7 @@ copy_header() {
 }
 
 verify() {
-	local fail=0 a n minos members coff foreign
+	local fail=0 a n minos members coff foreign want archs matched
 	for a in "$REPO"/lib/*/libsql_experimental.a; do
 		for p in "$LIBSQL_SRC" "$CARGO_HOME_DIR" "$WORK" "$HOME" /private/tmp; do
 			n="$(strings -a "$a" | grep -c -F "$p" || true)"
@@ -196,6 +204,17 @@ verify() {
 				fail=1
 			fi
 			echo "ok   $a: minimum macOS ${minos:-unknown}"
+			case "$a" in
+			*/darwin_arm64/*) want=arm64 ;;
+			*) want=x86_64 ;;
+			esac
+			archs="$(lipo -archs "$a" 2>/dev/null || true)"
+			if [ "$archs" != "$want" ]; then
+				echo "FAIL $a: lipo reads '${archs:-no Mach-O architecture}', want $want" >&2
+				fail=1
+			else
+				echo "ok   $a: $want"
+			fi
 			;;
 		*/linux_*)
 			if nm -u "$a" 2>/dev/null | grep -q -e '__isoc23_' ||
@@ -204,6 +223,18 @@ verify() {
 				fail=1
 			fi
 			echo "ok   $a: no glibc > 2.34 symbol references"
+			case "$a" in
+			*/linux_arm64/*) want=elf64-littleaarch64 ;;
+			*) want=elf64-x86-64 ;;
+			esac
+			members="$(objdump -f "$a" 2>/dev/null | grep -c 'file format' || true)"
+			matched="$(objdump -f "$a" 2>/dev/null | grep -c "file format $want" || true)"
+			if [ "$members" = 0 ] || [ "$members" != "$matched" ]; then
+				echo "FAIL $a: $matched of $members members are $want" >&2
+				fail=1
+			else
+				echo "ok   $a: $matched members, every one $want"
+			fi
 			;;
 		*/windows_*)
 			members="$(objdump -f "$a" 2>/dev/null | grep -c 'file format' || true)"
