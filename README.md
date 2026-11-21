@@ -9,6 +9,10 @@ This package comes with precompiled native libraries under `lib/`.
 libSQL 0.9.30 by `scripts/build-libs.sh` (darwin for macOS 11.0 and later; linux on Debian bookworm,
 so a binary linked on bookworm needs at most GLIBC_2.34; windows for `x86_64-pc-windows-gnu` with
 Debian bookworm's MinGW-w64 toolchain, gcc 12, so a Windows binary links it through a MinGW-w64 gcc).
+The script's `strip` step removes the LLVM bitcode sections Rust's standard library brings into each
+archive, and the windows archive's `.drectve` linker directives (DLL export lists, some of which Go
+refuses), because Go 1.27.4 and later refuse to link an archive carrying them from the module cache or
+from under the build directory; its `verify` step links a probe with Go 1.27.4 in both of those layouts.
 
 ## Features
 

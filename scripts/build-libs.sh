@@ -44,10 +44,35 @@
 #     SQLite3MultipleCiphers (the encryption feature bindings/c enables)
 #     through cmake's Unix Makefiles generator, and the slim image has no
 #     make, so cmake stops at "CMAKE_MAKE_PROGRAM is not set".
+#   - `strip` removes the LLVM bitcode sections (__LLVM,__bitcode and
+#     __LLVM,__cmdline in Mach-O, .llvmbc and .llvmcmd in ELF and COFF) from
+#     every archive in place with the Rust toolchain's rust-objcopy (OBJCOPY
+#     overrides it). cmd/go (Go 1.27.4 and later) scans every -L directory
+#     under the build's working directory, the module cache or the temporary
+#     directory, and refuses to link an archive with an LTO section,
+#     so without this no consumer that requires go-libsql by version, and no
+#     build run from this repository, links on a supported Go. The sections
+#     come from the prebuilt standard-library members rustup ships
+#     (compiler_builtins, std and their dependencies), which cargo links in
+#     without recompiling, so no RUSTFLAGS setting keeps them out. The
+#     windows archive also loses its .drectve sections: cmd/go refuses a
+#     directive value holding "..", which rustc's -exclude-symbols: entries for
+#     legacy-mangled compiler_builtins paths have, and the only other
+#     directives (-export: of the libsql_* functions) shape a DLL's export
+#     table, which no Go executable linking go-libsql needs.
+#   - `verify` links a probe program that opens libsql.DriverName and reads
+#     sqlite_version(), with VERIFY_GO (go1.27.4 by default, fetched through
+#     GOTOOLCHAIN), in the two layouts cmd/go scans: go-libsql under the
+#     build's working directory, and go-libsql from a module cache. darwin
+#     targets link and every probe this machine can execute runs; linux and
+#     windows targets run cmd/go's admission alone (go build -n scans the -L
+#     directory before any C compiler starts), because linking them needs
+#     that target's C toolchain. Each run writes a new verify-probe.* folder
+#     under WORK.
 #
 # Usage:
 #   LIBSQL_SRC=/path/to/libsql scripts/build-libs.sh [step...]
-#   steps: header darwin_arm64 darwin_amd64 linux windows verify   (default: all)
+#   steps: header darwin_arm64 darwin_amd64 linux windows strip verify   (default: all)
 set -euo pipefail
 
 LIBSQL_TAG="${LIBSQL_TAG:-libsql-0.9.30}"
@@ -64,6 +89,8 @@ MIN_FREE_GIB="${MIN_FREE_GIB:-6}"
 DATA_VOLUME="${DATA_VOLUME:-/System/Volumes/Data}"
 LINUX_IMAGE="${LINUX_IMAGE:-rust:1.95.0-slim-bookworm}"
 JOBS="${JOBS:-4}"
+OBJCOPY="${OBJCOPY:-}"
+VERIFY_GO="${VERIFY_GO:-go1.27.4}"
 
 # HOME_PATH_RE matches an absolute path under a user's home directory, in both
 # spellings an archive's debug and panic strings carry. CRATE_BUILD_PATHS are
@@ -177,6 +204,42 @@ copy_header() {
 	cp "$LIBSQL_SRC/bindings/c/include/libsql.h" "$REPO/lib/include/libsql.h"
 }
 
+# find_objcopy sets OBJCOPY to the rust-objcopy (an llvm-objcopy, which reads
+# Mach-O, ELF and COFF archives alike) every Rust toolchain ships in its
+# rustlib, unless OBJCOPY names another one.
+find_objcopy() {
+	local host
+	[ -n "$OBJCOPY" ] && return 0
+	host="$(rustc -vV | sed -n 's/^host: //p')"
+	OBJCOPY="$(rustc --print sysroot)/lib/rustlib/$host/bin/rust-objcopy"
+	if [ ! -x "$OBJCOPY" ]; then
+		echo "no rust-objcopy at $OBJCOPY; set OBJCOPY to an llvm-objcopy" >&2
+		exit 1
+	fi
+}
+
+# strip_bitcode rewrites each archive in place without its bitcode sections
+# (and the windows archive without its .drectve sections); llvm-objcopy keeps
+# every other section, symbol and the archive's index.
+strip_bitcode() {
+	local a
+	find_objcopy
+	for a in "$REPO"/lib/*/libsql_experimental.a; do
+		case "$a" in
+		*/darwin_*)
+			"$OBJCOPY" --remove-section=__LLVM,__bitcode --remove-section=__LLVM,__cmdline "$a"
+			;;
+		*/windows_*)
+			"$OBJCOPY" --remove-section=.llvmbc --remove-section=.llvmcmd --remove-section=.drectve "$a"
+			;;
+		*)
+			"$OBJCOPY" --remove-section=.llvmbc --remove-section=.llvmcmd "$a"
+			;;
+		esac
+		echo "ok   $a: bitcode sections removed"
+	done
+}
+
 verify() {
 	local fail=0 a n minos members coff foreign want archs matched
 	for a in "$REPO"/lib/*/libsql_experimental.a; do
@@ -252,11 +315,206 @@ verify() {
 		echo "FAIL lib/include/libsql.h differs from $LIBSQL_TAG" >&2
 		fail=1
 	fi
+	verify_probe || fail=1
+	return "$fail"
+}
+
+# probe_source writes into directory $1 the program verify_probe links: it
+# opens an in-memory database through libsql.DriverName and prints
+# sqlite_version(), so a probe that runs has called into the archive.
+probe_source() {
+	cat >"$1/main.go" <<'EOF'
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+
+	libsql "github.com/bbmumford/go-libsql"
+)
+
+func main() {
+	db, err := sql.Open(libsql.DriverName, ":memory:")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "open:", err)
+		os.Exit(1)
+	}
+	var v string
+	if err := db.QueryRow("select sqlite_version()").Scan(&v); err != nil {
+		fmt.Fprintln(os.Stderr, "query:", err)
+		os.Exit(1)
+	}
+	fmt.Println(v)
+}
+EOF
+}
+
+# mkzip_source writes into directory $1 a program that zips the checkout
+# os.Args[1] as the module zip os.Args[3], every path under the
+# module@version prefix os.Args[2], leaving out dot files and directories and
+# nested modules as the module proxy does; verify_probe serves the zip from a
+# file proxy for the module-cache layout.
+mkzip_source() {
+	cat >"$1/mkzip.go" <<'EOF'
+package main
+
+import (
+	"archive/zip"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	root, prefix, out := os.Args[1], os.Args[2], os.Args[3]
+	f, err := os.Create(out)
+	if err != nil {
+		panic(err)
+	}
+	zw := zip.NewWriter(f)
+	err = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil || rel == "." {
+			return err
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		w, err := zw.Create(prefix + "/" + filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(w, src)
+		return err
+	})
+	if err == nil {
+		err = zw.Close()
+	}
+	if err == nil {
+		err = f.Close()
+	}
+	if err != nil {
+		panic(err)
+	}
+}
+EOF
+}
+
+# runs_here reports whether this machine executes a darwin binary built for
+# GOARCH $1: natively, or an amd64 one through Rosetta on arm64.
+runs_here() {
+	case "$(uname -m)/$1" in
+	arm64/arm64 | x86_64/amd64) return 0 ;;
+	arm64/amd64) arch -x86_64 /usr/bin/true 2>/dev/null ;;
+	*) return 1 ;;
+	esac
+}
+
+# verify_probe builds the probe for every lib/ target with VERIFY_GO, twice:
+# "build-dir" builds from $REPO itself, so the -L directory libsql.go's #cgo
+# LDFLAGS line names is under the working directory (the probe module comes
+# in through a go.work and replaces go-libsql with $REPO); "module-cache"
+# serves this checkout as version v0.0.0-verify from a file proxy into a new
+# GOMODCACHE, as a consumer requiring go-libsql by version receives it
+# (GONOPROXY=none, because a GOPRIVATE naming github.com/bbmumford would send
+# the fetch past the file proxy to the repository).
+# Either refusal is a FAIL naming the target, the layout and cmd/go's reason.
+verify_probe() {
+	local goroot gob pv proxy goproxy a t goos goarch layout out n rc got fail=0
+	local v=v0.0.0-verify
+	goroot="$(GOTOOLCHAIN="$VERIFY_GO" go env GOROOT)" || {
+		echo "FAIL cannot run $VERIFY_GO through GOTOOLCHAIN" >&2
+		return 1
+	}
+	gob="$goroot/bin/go"
+	echo "ok   probe toolchain $("$gob" env GOVERSION)"
+	# The module-cache layout's GOMODCACHE starts empty, so go-libsql's own
+	# requirements are fetched: from this machine's module cache first, so a
+	# network outage does not read as a refused archive, then GOPROXY.
+	goproxy="file://$("$gob" env GOMODCACHE)/cache/download,$("$gob" env GOPROXY)"
+	pv="$(mktemp -d "$WORK/verify-probe.XXXXXX")"
+	proxy="$pv/proxy/github.com/bbmumford/go-libsql/@v"
+	mkdir -p "$pv/build-dir" "$pv/module-cache" "$pv/modcache" "$proxy"
+	for layout in build-dir module-cache; do
+		probe_source "$pv/$layout"
+		cp "$REPO/go.sum" "$pv/$layout/go.sum"
+	done
+	printf 'module verifyprobe\n\ngo 1.20\n\nrequire github.com/bbmumford/go-libsql v0.0.0\n\nreplace github.com/bbmumford/go-libsql => %s\n' "$REPO" >"$pv/build-dir/go.mod"
+	printf 'go 1.20\n\nuse ./build-dir\n' >"$pv/go.work"
+	printf 'module verifyprobe\n\ngo 1.20\n\nrequire github.com/bbmumford/go-libsql %s\n' "$v" >"$pv/module-cache/go.mod"
+	mkzip_source "$pv"
+	(cd "$pv" && GOTOOLCHAIN=local GOWORK=off GOFLAGS= "$gob" run ./mkzip.go "$REPO" "github.com/bbmumford/go-libsql@$v" "$proxy/$v.zip")
+	cp "$REPO/go.mod" "$proxy/$v.mod"
+	printf '{"Version":"%s"}\n' "$v" >"$proxy/$v.info"
+	echo "$v" >"$proxy/list"
+	for a in "$REPO"/lib/*/libsql_experimental.a; do
+		t="$(basename "$(dirname "$a")")"
+		goos="${t%_*}"
+		goarch="${t#*_}"
+		# A darwin probe links with the host's clang; any other target's link
+		# needs its own C toolchain, so -n stops after cmd/go's admission.
+		n=""
+		[ "$goos" = darwin ] || n="-n"
+		for layout in build-dir module-cache; do
+			out="$pv/probe-$layout-$t"
+			rc=0
+			if [ "$layout" = build-dir ]; then
+				(cd "$REPO" && GOTOOLCHAIN=local GOWORK="$pv/go.work" GOFLAGS= \
+					CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
+					"$gob" build $n -o "$out" verifyprobe) >"$out.log" 2>&1 || rc=$?
+			else
+				(cd "$pv/module-cache" && GOTOOLCHAIN=local GOWORK=off GOFLAGS=-mod=mod \
+					GOMODCACHE="$pv/modcache" GOPROXY="file://$pv/proxy,$goproxy" \
+					GONOPROXY=none GONOSUMDB=github.com/bbmumford/go-libsql \
+					CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
+					"$gob" build $n -o "$out" .) >"$out.log" 2>&1 || rc=$?
+			fi
+			if [ "$rc" != 0 ]; then
+				# -n prints every command it would run, so the reason is
+				# cmd/go's own refusal line, else the log's last line.
+				echo "FAIL $a: $VERIFY_GO refused the $layout probe: $(grep -m1 -E ': (disallowed|invalid) ' "$out.log" || tail -1 "$out.log")" >&2
+				fail=1
+			elif [ -n "$n" ]; then
+				echo "ok   $a: $VERIFY_GO admits it in the $layout layout (no $goos C toolchain here to link)"
+			elif runs_here "$goarch"; then
+				if got="$("$out" 2>&1)"; then
+					echo "ok   $a: the $layout probe links and runs, sqlite $got"
+				else
+					echo "FAIL $a: the $layout probe links but fails: $got" >&2
+					fail=1
+				fi
+			else
+				echo "ok   $a: the $layout probe links (this machine cannot run $goarch)"
+			fi
+		done
+	done
 	return "$fail"
 }
 
 steps=("$@")
-[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows verify)
+[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows strip verify)
 check_tag
 for s in "${steps[@]}"; do
 	case "$s" in
@@ -265,6 +523,7 @@ for s in "${steps[@]}"; do
 	darwin_amd64) build_darwin x86_64-apple-darwin darwin_amd64 ;;
 	linux) build_linux ;;
 	windows) build_windows ;;
+	strip) strip_bitcode ;;
 	verify) verify ;;
 	*)
 		echo "unknown step $s" >&2
