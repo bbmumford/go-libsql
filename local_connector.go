@@ -175,8 +175,8 @@ func (c *config) refuseLocalOnly() error {
 // keys its file with WithKey or WithHexKey.
 func (c *config) refuseReplicaOnly() error {
 	if c.authToken != nil || c.readYourWrites != nil || c.encryptionKey != nil ||
-		c.remoteEncryptionKey != nil || c.syncInterval != nil {
-		return errors.New("WithAuthToken, WithReadYourWrites, WithEncryption, WithRemoteEncryption and WithSyncInterval apply only to replica connectors; NewLocalConnector takes WithKey or WithHexKey")
+		c.remoteEncryptionKey != nil || c.syncInterval != nil || c.readOnly {
+		return errors.New("WithAuthToken, WithReadYourWrites, WithEncryption, WithRemoteEncryption, WithSyncInterval and WithReadOnly apply only to replica connectors; NewLocalConnector takes WithKey or WithHexKey, and WithQueryOnly for a file it must not write")
 	}
 	return nil
 }

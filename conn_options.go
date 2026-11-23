@@ -18,6 +18,9 @@ import (
 type connOptions struct {
 	immediateTransactions bool
 	rawText               bool
+	// readOnly is WithReadOnly's: every statement passes the gate in
+	// readonly.go before any C call.
+	readOnly bool
 }
 
 func (c *config) connOptions() connOptions {
@@ -28,6 +31,7 @@ func (c *config) connOptions() connOptions {
 	if c.rawText != nil {
 		o.rawText = *c.rawText
 	}
+	o.readOnly = c.readOnly
 	return o
 }
 
@@ -71,9 +75,20 @@ func WithImmediateTransactions(immediate bool) Option {
 
 // beginStatement is the statement BeginTx sends for opts. Without
 // WithImmediateTransactions it is BEGIN, and ReadOnly and every isolation
-// level other than the default are refused.
+// level other than the default are refused. Under WithReadOnly it is BEGIN
+// READONLY, the one BEGIN libSQL's replica connection keeps on the replica,
+// and a transaction without ReadOnly is refused with ErrReadOnlyReplica.
 func (c *conn) beginStatement(opts sqldriver.TxOptions) (string, error) {
 	level := sql.IsolationLevel(opts.Isolation)
+	if c.opts.readOnly {
+		if !opts.ReadOnly {
+			return "", refusal("BEGIN", "a transaction that can write goes to the primary; pass sql.TxOptions{ReadOnly: true}")
+		}
+		if level != sql.LevelDefault && (!c.opts.immediateTransactions || level != sql.LevelSerializable) {
+			return "", fmt.Errorf("isolation level %d is not supported", opts.Isolation)
+		}
+		return "BEGIN READONLY", nil
+	}
 	if !c.opts.immediateTransactions {
 		if opts.ReadOnly {
 			return "", errors.New("read only transactions are not supported")

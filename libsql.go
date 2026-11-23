@@ -62,6 +62,8 @@ type config struct {
 	// Set by the connection options in conn_options.go, for every connector.
 	immediateTransactions *bool
 	rawText               *bool
+	// Set by WithReadOnly in readonly.go, for the replica connectors.
+	readOnly bool
 }
 
 type Option interface {
@@ -483,6 +485,9 @@ type conn struct {
 	nativePtr C.libsql_connection_t
 	local     bool
 	opts      connOptions
+	// readTx is whether a read transaction is open, as libSQL's replica
+	// connection holds it; read and set only under opts.readOnly (admit).
+	readTx bool
 }
 
 func (c *conn) Prepare(query string) (sqldriver.Stmt, error) {
@@ -579,6 +584,13 @@ func parseStatement(sql string) ([]string, []ParamsInfo, error) {
 }
 
 func (c *conn) PrepareContext(ctx context.Context, query string) (sqldriver.Stmt, error) {
+	if c.opts.readOnly {
+		// The state is recorded when the statement runs, through ExecContext
+		// or QueryContext, which check it again.
+		if _, err := admitStatements(query, 0, c.readTx); err != nil {
+			return nil, err
+		}
+	}
 	stmts, paramInfos, err := parseStatement(query)
 	if err != nil {
 		return nil, err
@@ -906,6 +918,11 @@ Outerloop:
 }
 
 func (c *conn) QueryContext(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Rows, error) {
+	if c.opts.readOnly {
+		if err := c.admit(query, len(args)); err != nil {
+			return nil, err
+		}
+	}
 	rowsNativePtr, err := c.execute(query, args, false)
 	if err != nil {
 		return nil, err

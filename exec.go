@@ -34,6 +34,11 @@ import (
 // The result is the last statement's, as sqlite3_changes and
 // sqlite3_last_insert_rowid report after running the statements one by one.
 func (c *conn) ExecContext(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Result, error) {
+	if c.opts.readOnly {
+		if err := c.admit(query, len(args)); err != nil {
+			return nil, err
+		}
+	}
 	stmts := splitStatements(query)
 	if len(stmts) <= 1 {
 		return c.execOne(query, args)
