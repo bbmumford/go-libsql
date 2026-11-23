@@ -1,7 +1,15 @@
-# LibSQL package for Go
+# go-libsql
 
-[libSQL](https://github.com/tursodatabase/libsql) is an open source, open contribution fork of SQLite.
-This source repository contains libSQL API bindings for Go.
+go-libsql is a Go `database/sql` driver for [libSQL](https://github.com/tursodatabase/libsql),
+the open-source fork of SQLite: local database files, remote access to a libSQL server, and
+embedded replicas that keep a local file in step with a libSQL primary. It is a fork of
+[tursodatabase/go-libsql](https://github.com/tursodatabase/go-libsql), kept here with its own
+build of the native libraries and these additions: the driver registers as `libsql-cgo`
+(`DriverName`), `NewLocalConnector` opens and encrypts local files, replicas take
+`WithEncryption`, `WithReadYourWrites`, `WithImmediateTransactions`, `WithRawText` and
+`WithReadOnly` (a replica connector that refuses every statement it would send to the primary),
+and `NewLocalConnector` refuses to open, under a key, a file that begins with the plaintext
+SQLite header.
 
 ## Notice
 This package comes with precompiled native libraries under `lib/`.
@@ -35,14 +43,17 @@ link `github.com/tursodatabase/libsql-client-go`, which registers `libsql`.
 
 ### Connecting to the database
 
-To connect to the database one needs to create a `libsql.Connector` using one of the factory functions: `libsql.NewEmbeddedReplicaConnector` or `libsql.NewEmbeddedReplicaConnectorWithAutoSync`.
+To connect to the database one creates a `libsql.Connector` with `libsql.NewEmbeddedReplicaConnector(dbPath, primaryUrl, opts...)`.
 
 Here's an example of obtaining a `sql.DB` object from `database/sql` package:
 
 ```
 dbPath := // Path do db file on local disk
 primaryUrl := // URL to primary database instance
-connector := NewEmbeddedReplicaConnector(dbPath, primaryUrl, authToken)
+connector, err := libsql.NewEmbeddedReplicaConnector(dbPath, primaryUrl, libsql.WithAuthToken(authToken))
+if err != nil {
+    return err
+}
 db := sql.OpenDB(connector)
 defer db.Close()
 ```
@@ -68,23 +79,49 @@ Arguments bind by position; named arguments (`sql.Named`) are refused.
 
 ### Fetching updates from primary database instance
 
-If the connector is created with `libsql.NewEmbeddedReplicaConnectorWithAutoSync` then it will automatically fetch updates from a primary periodically.
+A connector created with `libsql.WithSyncInterval(d)` fetches updates from the primary every `d`.
 
-For connectors created with `libsql.NewEmbeddedReplicaConnector` we need to fetch updates manually by calling `connector.Sync`
+Without it, fetch updates by calling `connector.Sync()`.
 
 ## Examples
 
-Module with usage examples can be found in [example directory].
+A module with usage examples is in the [example directory] (`example/`, module
+`github.com/tursodatabase/go-libsql/example`).
 
-## License
+## Dependencies
 
-This project is licensed under the [MIT license].
+- No other package of this estate.
+- `github.com/libsql/sqlite-antlr4-parser` and `github.com/antlr4-go/antlr/v4`, which split a
+  multi-statement string into statements.
+- The libSQL native library, precompiled under `lib/` (see Notice).
 
-### Contribution
+## Used by
+
+Importers in the ORBTR estate:
+
+- `github.com/bbmumford/tursoraft/replica`: every shared database's encrypted embedded replica.
+- `github.com/ORBTR/worker/internal/convdb` (and the worker's `agents`, `conversation` and
+  `scheduler` tests): the worker's conversation store.
+
+## Platforms and build
+
+Every file needs cgo (`//go:build cgo`): build with `CGO_ENABLED=1` and a C toolchain for the
+target. The precompiled libraries cover linux amd64 and arm64, darwin amd64 and arm64, and windows
+amd64 (see Notice). The module's `go` directive is 1.20.
+
+## Licence
+
+MIT, upstream's licence, kept unchanged in [LICENSE](LICENSE): Copyright (c) 2017 Joshua Wise and
+Copyright (c) 2023 Pekka Enberg.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in libSQL by you, shall be licensed as MIT, without any additional
 terms or conditions.
 
-[MIT license]: https://github.com/tursodatabase/go-libsql/blob/main/LICENSE
-[example directory]: https://github.com/tursodatabase/go-libsql/tree/main/example
+## Contributing
+
+[AGENTS.md](AGENTS.md) holds the repository's two rules, for people and coding agents alike: no
+temporary documents in the repository, and conventional commit messages that stand on their own.
+[CLAUDE.md](CLAUDE.md) imports it for Claude Code.
+
+[example directory]: example
