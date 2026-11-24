@@ -17,7 +17,10 @@
 #     committed to a repository other people fetch; `verify` fails when a
 #     local path survives in an archive, and also when any home-directory
 #     path outside CRATE_BUILD_PATHS does, which is a path of whatever
-#     machine produced the file rather than of this one.
+#     machine produced the file rather than of this one. $HOME's map is given
+#     first: rustc and the C compilers apply the last map that matches, and
+#     LIBSQL_SRC, CARGO_HOME_DIR and the target directory may all sit under
+#     $HOME, where $HOME's map alone would leave /home/<their path> behind.
 #   - darwin objects are compiled with MACOSX_DEPLOYMENT_TARGET=11.0 so a
 #     worker binary linking them runs on every macOS the worker supports;
 #     `verify` fails on any object whose minimum OS is newer.
@@ -69,10 +72,32 @@
 #     directory before any C compiler starts), because linking them needs
 #     that target's C toolchain. Each run writes a new verify-probe.* folder
 #     under WORK.
+#   - Every build step compiles LIBSQL_SRC's tree at LIBSQL_TAG with the
+#     patches in scripts/libsql-patches/ applied in file-name order, copied
+#     to WORK/libsql-<tag>-patched-<digest of the patches> the first time a
+#     patch set is used and reused after, because LIBSQL_SRC stays the clean
+#     checkout check_tag reads. The patches give a replica on libSQL's HTTP
+#     sync path (the one it takes whenever the primary answers /info) the
+#     local encryption key it is opened with: without them that replica's
+#     database file, WAL and bootstrap download are written in plaintext
+#     although libsql_config carries encryption_key.
+#   - `verify` fails unless every archive defines libsql_complete and
+#     libsql.h declares it: exec.go's statement splitter calls it, and the
+#     patches add it.
+#   - CONTAINER_PROXY, when set, is handed to both containers as http_proxy
+#     and https_proxy, for a build machine whose containers reach Debian's
+#     archive and the crate registry only through a proxy; LINUX_IMAGE must
+#     then have apt sources that use https.
+#   - `encrypted` runs the package tests that open a keyed embedded replica and
+#     a keyed offline-writes database of an in-process primary answering the
+#     HTTP sync protocol, with VERIFY_GO
+#     against the archive of the host's GOOS/GOARCH (the only one this machine
+#     runs), and fails unless the tests ran and found each database file
+#     without the SQLite header and no file beside it holding a row.
 #
 # Usage:
 #   LIBSQL_SRC=/path/to/libsql scripts/build-libs.sh [step...]
-#   steps: header darwin_arm64 darwin_amd64 linux windows strip verify   (default: all)
+#   steps: header darwin_arm64 darwin_amd64 linux windows strip verify encrypted   (default: all)
 set -euo pipefail
 
 LIBSQL_TAG="${LIBSQL_TAG:-libsql-0.9.30}"
@@ -119,6 +144,36 @@ check_tag() {
 	fi
 }
 
+# patched_source prints the directory the build steps compile. A reused
+# directory must still hold every patch (git apply -R --check), so a copy an
+# interrupted run or a hand edit left behind is refused rather than built.
+# GIT_CEILING_DIRECTORIES keeps git apply from treating a WORK that sits
+# inside a repository as that repository's tree.
+patched_source() {
+	local digest dir tmp p
+	digest="$(cat "$REPO"/scripts/libsql-patches/*.patch | shasum -a 256 | cut -c1-12)"
+	dir="$WORK/libsql-$LIBSQL_TAG-patched-$digest"
+	if [ ! -d "$dir" ]; then
+		tmp="$dir.partial.$$"
+		mkdir -p "$tmp"
+		git -C "$LIBSQL_SRC" archive "$LIBSQL_TAG" | tar -x -C "$tmp"
+		for p in "$REPO"/scripts/libsql-patches/*.patch; do
+			(cd "$tmp" && GIT_CEILING_DIRECTORIES="$(dirname "$tmp")" git apply --whitespace=nowarn "$p") || {
+				echo "patch $(basename "$p") does not apply to $LIBSQL_TAG" >&2
+				exit 1
+			}
+		done
+		mv "$tmp" "$dir"
+	fi
+	for p in "$REPO"/scripts/libsql-patches/*.patch; do
+		(cd "$dir" && GIT_CEILING_DIRECTORIES="$(dirname "$dir")" git apply -R --check "$p" 2>/dev/null) || {
+			echo "$dir does not hold patch $(basename "$p"); move it aside and rerun" >&2
+			exit 1
+		}
+	done
+	printf '%s\n' "$dir"
+}
+
 check_disk() {
 	local free_kib
 	[ -d "$DATA_VOLUME" ] || DATA_VOLUME=/
@@ -137,8 +192,8 @@ build_darwin() {
 		cd "$LIBSQL_SRC/bindings/c"
 		export CARGO_HOME="$CARGO_HOME_DIR" CARGO_TARGET_DIR="$tdir"
 		export MACOSX_DEPLOYMENT_TARGET=11.0
-		export RUSTFLAGS="--remap-path-prefix=$LIBSQL_SRC=/libsql --remap-path-prefix=$CARGO_HOME_DIR=/cargo-home --remap-path-prefix=$tdir=/target --remap-path-prefix=$HOME=/home"
-		export CFLAGS="-ffile-prefix-map=$LIBSQL_SRC=/libsql -ffile-prefix-map=$CARGO_HOME_DIR=/cargo-home -ffile-prefix-map=$tdir=/target -ffile-prefix-map=$HOME=/home"
+		export RUSTFLAGS="--remap-path-prefix=$HOME=/home --remap-path-prefix=$LIBSQL_SRC=/libsql --remap-path-prefix=$CARGO_HOME_DIR=/cargo-home --remap-path-prefix=$tdir=/target"
+		export CFLAGS="-ffile-prefix-map=$HOME=/home -ffile-prefix-map=$LIBSQL_SRC=/libsql -ffile-prefix-map=$CARGO_HOME_DIR=/cargo-home -ffile-prefix-map=$tdir=/target"
 		export CXXFLAGS="$CFLAGS"
 		rustup target add "$target" >/dev/null
 		cargo build --release --locked --target "$target" -j "$JOBS"
@@ -156,6 +211,7 @@ build_linux() {
 	docker run --rm --platform linux/arm64 \
 		-v "$LIBSQL_SRC":/src -v "$CARGO_HOME_DIR":/cargo-home -v "$WORK/target-linux":/target \
 		-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/target -e JOBS="$JOBS" \
+		${CONTAINER_PROXY:+-e http_proxy=$CONTAINER_PROXY -e https_proxy=$CONTAINER_PROXY} \
 		"$LINUX_IMAGE" bash -euc '
 			apt-get update -qq
 			apt-get install -y -qq --no-install-recommends cmake make g++ \
@@ -183,6 +239,7 @@ build_windows() {
 	docker run --rm --platform linux/arm64 \
 		-v "$LIBSQL_SRC":/src -v "$CARGO_HOME_DIR":/cargo-home -v "$WORK/target-windows":/target \
 		-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/target -e JOBS="$JOBS" \
+		${CONTAINER_PROXY:+-e http_proxy=$CONTAINER_PROXY -e https_proxy=$CONTAINER_PROXY} \
 		"$LINUX_IMAGE" bash -euc '
 			apt-get update -qq
 			apt-get install -y -qq --no-install-recommends cmake make \
@@ -311,6 +368,18 @@ verify() {
 			;;
 		esac
 	done
+	for a in "$REPO"/lib/*/libsql_experimental.a; do
+		if nm -g "$a" 2>/dev/null | grep -E ' T _?libsql_complete$' >/dev/null; then
+			echo "ok   $a: defines libsql_complete"
+		else
+			echo "FAIL $a: does not define libsql_complete" >&2
+			fail=1
+		fi
+	done
+	if ! grep -q 'libsql_complete' "$REPO/lib/include/libsql.h"; then
+		echo "FAIL lib/include/libsql.h does not declare libsql_complete" >&2
+		fail=1
+	fi
 	if ! cmp -s "$LIBSQL_SRC/bindings/c/include/libsql.h" "$REPO/lib/include/libsql.h"; then
 		echo "FAIL lib/include/libsql.h differs from $LIBSQL_TAG" >&2
 		fail=1
@@ -513,9 +582,30 @@ verify_probe() {
 	return "$fail"
 }
 
+# verify_encrypted fails closed: a test that did not run (renamed, skipped
+# without cgo) is a failure, not a pass.
+verify_encrypted() {
+	local out t
+	out="$(cd "$REPO" && GOTOOLCHAIN="$VERIFY_GO" GOWORK=off GOFLAGS= CGO_ENABLED=1 \
+		go test -count=1 -v -run '^(TestKeyedReplicaOnHTTPSyncIsEncryptedAtRest|TestKeyedSyncedDatabaseOnHTTPSyncIsEncryptedAtRest|TestUnkeyedReplicaOnHTTPSyncIsPlaintext)$' . 2>&1)" || {
+		printf '%s\n' "$out" >&2
+		echo "FAIL a keyed replica on the HTTP sync path is not encrypted at rest" >&2
+		return 1
+	}
+	for t in TestKeyedReplicaOnHTTPSyncIsEncryptedAtRest TestKeyedSyncedDatabaseOnHTTPSyncIsEncryptedAtRest TestUnkeyedReplicaOnHTTPSyncIsPlaintext; do
+		if ! printf '%s\n' "$out" | grep -q -F -- "--- PASS: $t ("; then
+			printf '%s\n' "$out" >&2
+			echo "FAIL $t did not run" >&2
+			return 1
+		fi
+	done
+	echo "ok keyed replica on the HTTP sync path is encrypted at rest"
+}
+
 steps=("$@")
-[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows strip verify)
+[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows strip verify encrypted)
 check_tag
+LIBSQL_SRC="$(patched_source)"
 for s in "${steps[@]}"; do
 	case "$s" in
 	header) copy_header ;;
@@ -525,6 +615,7 @@ for s in "${steps[@]}"; do
 	windows) build_windows ;;
 	strip) strip_bitcode ;;
 	verify) verify ;;
+	encrypted) verify_encrypted ;;
 	*)
 		echo "unknown step $s" >&2
 		exit 2

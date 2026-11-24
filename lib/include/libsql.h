@@ -167,6 +167,8 @@ void libsql_free_row(libsql_row_t res);
 
 int libsql_get_string(libsql_row_t res, int col, const char **out_value, const char **out_err_msg);
 
+int libsql_complete(const char *sql);
+
 void libsql_free_string(const char *ptr);
 
 int libsql_get_int(libsql_row_t res, int col, long long *out_value, const char **out_err_msg);

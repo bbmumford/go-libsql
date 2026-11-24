@@ -1,0 +1,791 @@
+diff --git a/bindings/c/src/lib.rs b/bindings/c/src/lib.rs
+index ee6aab5..0a46474 100644
+--- a/bindings/c/src/lib.rs
++++ b/bindings/c/src/lib.rs
+@@ -288,6 +288,19 @@ pub unsafe extern "C" fn libsql_open_sync_with_config(
+                 });
+             }
+         };
++        if !config.encryption_key.is_null() {
++            let key = unsafe { std::ffi::CStr::from_ptr(config.encryption_key) };
++            let key = match key.to_str() {
++                Ok(k) => k,
++                Err(e) => {
++                    set_err_msg(format!("Wrong encryption key: {e}"), out_err_msg);
++                    return 5;
++                }
++            };
++            let key = bytes::Bytes::copy_from_slice(key.as_bytes());
++            let config = libsql::EncryptionConfig::new(libsql::Cipher::Aes256Cbc, key);
++            builder = builder.encryption_config(config);
++        };
+         match RT.block_on(builder.build()) {
+             Ok(db) => {
+                 let db = Box::leak(Box::new(libsql_database { db }));
+diff --git a/libsql/src/database/builder.rs b/libsql/src/database/builder.rs
+index e691adc..e719ccc 100644
+--- a/libsql/src/database/builder.rs
++++ b/libsql/src/database/builder.rs
+@@ -118,6 +118,7 @@ impl Builder<()> {
+                     push_batch_size: 0,
+                     sync_interval: None,
+                     remote_encryption: None,
++                    encryption_config: None,
+                 },
+             }
+         }
+@@ -441,6 +442,10 @@ cfg_replication! {
+                                 builder = builder.remote_encryption(encryption);
+                             }
+ 
++                            if let Some(ref encryption_config) = encryption_config {
++                                builder = builder.encryption_config(encryption_config.clone());
++                            }
++
+                             let builder = if let Some(sync_interval) = sync_interval {
+                                 builder.sync_interval(sync_interval)
+                             } else {
+@@ -591,6 +596,7 @@ cfg_sync! {
+         push_batch_size: u32,
+         sync_interval: Option<std::time::Duration>,
+         remote_encryption: Option<EncryptionContext>,
++        encryption_config: Option<EncryptionConfig>,
+     }
+ 
+     impl Builder<SyncedDatabase> {
+@@ -629,6 +635,17 @@ cfg_sync! {
+             self
+         }
+ 
++        /// Set an encryption config that will encrypt the local database: the database file
++        /// downloaded at bootstrap, every frame pulled into its WAL, and every connection opened
++        /// on it, so no page of the synced database reaches the disk unencrypted.
++        pub fn encryption_config(
++            mut self,
++            encryption_config: EncryptionConfig,
++        ) -> Builder<SyncedDatabase> {
++            self.inner.encryption_config = Some(encryption_config);
++            self
++        }
++
+         /// Provide a custom http connector that will be used to create http connections.
+         pub fn connector<C>(mut self, connector: C) -> Builder<SyncedDatabase>
+         where
+@@ -663,6 +680,7 @@ cfg_sync! {
+                 push_batch_size,
+                 sync_interval,
+                 remote_encryption,
++                encryption_config,
+             } = self.inner;
+ 
+             let path = path.to_str().ok_or(crate::Error::InvalidUTF8Path)?.to_owned();
+@@ -687,6 +705,7 @@ cfg_sync! {
+                 url.clone(),
+                 auth_token.clone(),
+                 remote_encryption.clone(),
++                encryption_config,
+             )
+             .await?;
+ 
+diff --git a/libsql/src/local/connection.rs b/libsql/src/local/connection.rs
+index 7012651..9439fce 100644
+--- a/libsql/src/local/connection.rs
++++ b/libsql/src/local/connection.rs
+@@ -77,6 +77,35 @@ impl Connection {
+             writer: db.writer()?,
+             authorizer: Arc::new(RwLock::new(None)),
+         };
++        // The key goes on before the first statement below reads the file, because the
++        // journal-mode pragma is the first read of a synced database and fails on an
++        // encrypted file opened without it.
++        #[cfg(feature = "sync")]
++        if let Some(cfg) = &db.encryption_config {
++            #[cfg(feature = "encryption")]
++            {
++                if unsafe { libsql_sys::connection::set_encryption_cipher(conn.raw, cfg.cipher_id()) }
++                    == -1
++                {
++                    return Err(Error::Misuse(
++                        "failed to set encryption cipher".to_string(),
++                    ));
++                }
++                if unsafe {
++                    libsql_sys::connection::set_encryption_key(conn.raw, &cfg.encryption_key)
++                } != ffi::SQLITE_OK
++                {
++                    return Err(Error::Misuse("failed to set encryption key".to_string()));
++                }
++            }
++            #[cfg(not(feature = "encryption"))]
++            {
++                let _ = cfg;
++                return Err(Error::Misuse(
++                    "Encryption is not enabled: enable the `encryption` feature in order to enable encryption-at-rest".to_string(),
++                ));
++            }
++        }
+         #[cfg(feature = "sync")]
+         if let Some(_) = db.sync_ctx {
+             // We need to make sure database is in WAL mode with checkpointing
+diff --git a/libsql/src/local/database.rs b/libsql/src/local/database.rs
+index 5d5eda0..f48d047 100644
+--- a/libsql/src/local/database.rs
++++ b/libsql/src/local/database.rs
+@@ -35,6 +35,11 @@ pub struct Database {
+     pub replication_ctx: Option<ReplicationContext>,
+     #[cfg(feature = "sync")]
+     pub sync_ctx: Option<Arc<Mutex<SyncContext>>>,
++    /// The cipher and key every connection to this database is opened with, before its first
++    /// statement; set for a synced database opened with a local encryption config, whose
++    /// connections are made inside the sync code as well as by the caller.
++    #[cfg(feature = "sync")]
++    pub(crate) encryption_config: Option<crate::EncryptionConfig>,
+ }
+ 
+ impl Database {
+@@ -74,6 +79,8 @@ impl Database {
+                 replication_ctx: None,
+                 #[cfg(feature = "sync")]
+                 sync_ctx: None,
++                #[cfg(feature = "sync")]
++                encryption_config: None,
+             })
+         }
+     }
+@@ -213,6 +220,7 @@ impl Database {
+         endpoint: String,
+         auth_token: String,
+         remote_encryption: Option<crate::database::EncryptionContext>,
++        encryption_config: Option<crate::EncryptionConfig>,
+     ) -> Result<Database> {
+         let db_path = db_path.into();
+         let endpoint = if endpoint.starts_with("libsql:") {
+@@ -221,8 +229,9 @@ impl Database {
+             endpoint
+         };
+         let mut db = Database::open(&db_path, flags)?;
++        db.encryption_config = encryption_config.clone();
+ 
+-        let sync_ctx = SyncContext::new(
++        let mut sync_ctx = SyncContext::new(
+             connector,
+             db_path.into(),
+             endpoint,
+@@ -230,6 +239,7 @@ impl Database {
+             remote_encryption,
+         )
+         .await?;
++        sync_ctx.set_encryption_config(encryption_config);
+         db.sync_ctx = Some(Arc::new(Mutex::new(sync_ctx)));
+ 
+         Ok(db)
+@@ -344,6 +354,8 @@ impl Database {
+             replication_ctx: None,
+             #[cfg(feature = "sync")]
+             sync_ctx: None,
++            #[cfg(feature = "sync")]
++            encryption_config: None,
+         }
+     }
+ 
+diff --git a/libsql/src/sync.rs b/libsql/src/sync.rs
+index 9f91779..77c4320 100644
+--- a/libsql/src/sync.rs
++++ b/libsql/src/sync.rs
+@@ -12,6 +12,8 @@ use zerocopy::big_endian;
+ 
+ #[cfg(test)]
+ mod test;
++#[cfg(all(test, feature = "encryption"))]
++mod encryption_test;
+ 
+ pub mod connection;
+ pub mod statement;
+@@ -72,6 +74,8 @@ pub enum SyncError {
+     InvalidRemoteState(String),
+     #[error("server returned invalid length of frames: {0}")]
+     InvalidPullFrameBytes(usize),
++    #[error("server returned an invalid db export: {0}")]
++    InvalidExport(String),
+ }
+ 
+ impl SyncError {
+@@ -138,6 +142,9 @@ pub struct SyncContext {
+     initial_server_sync: bool,
+     /// The encryption context for the sync.
+     remote_encryption: Option<EncryptionContext>,
++    /// The cipher and key the local database file is encrypted with; when set, the db export
++    /// downloaded at bootstrap is written to disk only through it.
++    encryption_config: Option<crate::EncryptionConfig>,
+ }
+ 
+ impl SyncContext {
+@@ -170,6 +177,7 @@ impl SyncContext {
+             durable_frame_num: 0,
+             initial_server_sync: false,
+             remote_encryption,
++            encryption_config: None,
+         };
+         me.read_metadata().await?;
+         Ok(me)
+@@ -179,6 +187,15 @@ impl SyncContext {
+         self.push_batch_size = push_batch_size;
+     }
+ 
++    /// Sets the cipher and key the local database file is encrypted with, which the bootstrap
++    /// writes the downloaded db export through.
++    pub(crate) fn set_encryption_config(
++        &mut self,
++        encryption_config: Option<crate::EncryptionConfig>,
++    ) {
++        self.encryption_config = encryption_config;
++    }
++
+     #[tracing::instrument(skip(self))]
+     pub(crate) async fn pull_frames(
+         &mut self,
+@@ -735,7 +752,18 @@ impl SyncContext {
+             .await
+             .map_err(SyncError::HttpBody)?;
+ 
+-        atomic_write(&self.db_path, &bytes).await?;
++        match &self.encryption_config {
++            Some(encryption_config) => {
++                let path = self.db_path.clone();
++                let encryption_config = encryption_config.clone();
++                tokio::task::spawn_blocking(move || {
++                    write_encrypted_export(&path, &bytes, &encryption_config)
++                })
++                .await
++                .map_err(|e| SyncError::InvalidLocalState(format!("encrypted export write: {e}")))??;
++            }
++            None => atomic_write(&self.db_path, &bytes).await?,
++        }
+         self.durable_generation = generation;
+         self.durable_frame_num = 0;
+         self.write_metadata().await?;
+@@ -743,6 +771,99 @@ impl SyncContext {
+     }
+ }
+ 
++/// Writes a db export to `path` encrypted with `encryption_config`, so the export's pages reach
++/// the disk only through the cipher. The pages go, as one transaction of WAL frames, into a new
++/// database beside `path` opened with the key; that WAL is checkpointed into the new file, and
++/// the file is renamed over `path`. Page numbers and contents stay the export's, because
++/// `try_pull` later inserts the frames pulled from `/sync` on top of them by page number, and
++/// the WAL is left empty, because those frames are inserted from frame 1.
++fn write_encrypted_export(
++    path: &str,
++    data: &[u8],
++    encryption_config: &crate::EncryptionConfig,
++) -> Result<()> {
++    const HEADER: &[u8; 16] = b"SQLite format 3\0";
++    if data.len() < 100 || &data[..16] != HEADER {
++        return Err(SyncError::InvalidExport("not a SQLite database file".to_string()).into());
++    }
++    let page_size = match u16::from_be_bytes([data[16], data[17]]) {
++        1 => 65536usize,
++        n => n as usize,
++    };
++    if page_size < 512 || !page_size.is_power_of_two() || data.len() % page_size != 0 {
++        return Err(SyncError::InvalidExport(format!(
++            "length {} is not a whole number of {page_size}-byte pages",
++            data.len()
++        ))
++        .into());
++    }
++    let page_count = (data.len() / page_size) as u32;
++
++    let directory = Path::new(path).parent().ok_or_else(|| {
++        SyncError::io("parent path")(std::io::Error::other(
++            "unable to get parent of the provided path",
++        ))
++    })?;
++    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
++    let temp_path = directory.join(format!(".tmp.{}.{}", timestamp, Uuid::new_v4()));
++    let temp = temp_path
++        .to_str()
++        .ok_or(crate::Error::InvalidUTF8Path)?
++        .to_owned();
++
++    let written = (|| -> Result<()> {
++        let mut db = crate::local::Database::new(
++            temp.clone(),
++            crate::OpenFlags::SQLITE_OPEN_READ_WRITE | crate::OpenFlags::SQLITE_OPEN_CREATE,
++        );
++        db.encryption_config = Some(encryption_config.clone());
++        let conn = db.connect()?;
++        conn.execute(&format!("PRAGMA page_size = {page_size}"), crate::params::Params::None)?;
++        let journal_mode = conn
++            .query("PRAGMA journal_mode = WAL", crate::params::Params::None)?
++            .ok_or_else(|| SyncError::InvalidLocalState("journal_mode returned no row".into()))?
++            .next()?
++            .ok_or_else(|| SyncError::InvalidLocalState("journal_mode returned no row".into()))?
++            .get::<String>(0)?;
++        if !journal_mode.eq_ignore_ascii_case("wal") {
++            return Err(SyncError::InvalidLocalState(format!(
++                "encrypted export opened in journal mode {journal_mode}, not wal"
++            ))
++            .into());
++        }
++        {
++            let insert_handle = conn.wal_insert_handle();
++            insert_handle.begin()?;
++            let mut frame = vec![0u8; FRAME_HEADER_SIZE + page_size];
++            for (index, page) in data.chunks_exact(page_size).enumerate() {
++                let page_no = index as u32 + 1;
++                let size_after = if page_no == page_count { page_count } else { 0 };
++                frame[..FRAME_HEADER_SIZE].fill(0);
++                frame[0..4].copy_from_slice(&page_no.to_be_bytes());
++                frame[4..8].copy_from_slice(&size_after.to_be_bytes());
++                frame[FRAME_HEADER_SIZE..].copy_from_slice(page);
++                insert_handle.insert_at(page_no, &frame)?;
++            }
++            insert_handle.end()?;
++        }
++        conn.wal_checkpoint(true)?;
++        drop(conn);
++        drop(db);
++        std::fs::File::open(&temp_path)
++            .and_then(|f| f.sync_all())
++            .map_err(SyncError::io("encrypted export sync_all"))?;
++        std::fs::rename(&temp_path, path).map_err(SyncError::io("atomic rename"))?;
++        Ok(())
++    })();
++
++    if written.is_err() {
++        for suffix in ["", "-wal", "-shm", "-journal"] {
++            let _ = std::fs::remove_file(format!("{temp}{suffix}"));
++        }
++    }
++    written
++}
++
+ #[derive(serde::Serialize, serde::Deserialize, Debug)]
+ struct MetadataJson {
+     hash: u32,
+diff --git a/libsql/src/sync/encryption_test.rs b/libsql/src/sync/encryption_test.rs
+new file mode 100644
+index 0000000..4768c57
+--- /dev/null
++++ b/libsql/src/sync/encryption_test.rs
+@@ -0,0 +1,419 @@
++//! Local encryption at rest on the HTTP sync (synced database) path.
++//!
++//! An in-process server answers the HTTP sync protocol the synced database speaks
++//! (`/info`, `/export/{generation}`, `GET` and `POST /sync/{generation}/{start}/{end}`)
++//! from a plaintext database built for each test, as a primary that answers
++//! `/info` does. Every file the client leaves in the replica's directory
++//! (the database, its WAL and shared-memory index, the `-info` metadata, and any
++//! temporary file of the bootstrap) is then searched for the rows' text.
++use crate::database::OpenFlags;
++use crate::params::Params;
++use crate::util::{ConnectorService, Socket};
++use crate::{Builder, Cipher, EncryptionConfig};
++use hyper::Body;
++use std::path::Path;
++use std::pin::Pin;
++use std::sync::{Arc, Mutex};
++use std::task::{Context, Poll};
++use tempfile::tempdir;
++use tokio::io::{duplex, AsyncRead, AsyncWrite, DuplexStream};
++use tower::Service;
++
++const EXPORT_MARKER: &str = "EXPORT-MARKER-6f1c2b";
++const FRAME_MARKER: &str = "FRAME-MARKER-9a7d3e";
++const PUSH_MARKER: &str = "PUSH-MARKER-41c8e0";
++const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
++const FRAME_SIZE: usize = 4096 + 24;
++
++fn key() -> EncryptionConfig {
++    EncryptionConfig::new(Cipher::Aes256Cbc, bytes::Bytes::from_static(b"0123456789abcdef0123456789abcdef"))
++}
++
++fn wrong_key() -> EncryptionConfig {
++    EncryptionConfig::new(Cipher::Aes256Cbc, bytes::Bytes::from_static(b"fedcba9876543210fedcba9876543210"))
++}
++
++/// The plaintext server side: the database file `/export/1` returns, and the WAL
++/// frames of generation 1 that `GET /sync/1/...` returns after it.
++struct Fixture {
++    export: Vec<u8>,
++    frames: Vec<Vec<u8>>,
++}
++
++/// Builds the server's plaintext database: 300 rows holding EXPORT_MARKER in the
++/// exported file and, when `with_frames`, 300 rows holding FRAME_MARKER in WAL
++/// frames written after the export.
++fn fixture(with_frames: bool) -> Fixture {
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("server.db");
++    let db = crate::local::Database::new(path.to_str().unwrap().to_string(), OpenFlags::default());
++    let conn = db.connect().unwrap();
++    conn.query("PRAGMA journal_mode = WAL", Params::None).unwrap();
++    conn.execute("CREATE TABLE t(x TEXT)", Params::None).unwrap();
++    conn.execute(
++        &format!(
++            "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 300) \
++             INSERT INTO t(x) SELECT '{EXPORT_MARKER}-' || i FROM c"
++        ),
++        Params::None,
++    )
++    .unwrap();
++    conn.wal_checkpoint(true).unwrap();
++    let export = std::fs::read(&path).unwrap();
++    assert_eq!(&export[..16], SQLITE_HEADER);
++    assert!(export.len() > 4096, "the export spans several pages");
++
++    let mut frames = Vec::new();
++    if with_frames {
++        conn.query("PRAGMA wal_autocheckpoint = 0", Params::None).unwrap();
++        conn.execute(
++            &format!(
++                "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 300) \
++                 INSERT INTO t(x) SELECT '{FRAME_MARKER}-' || i FROM c"
++            ),
++            Params::None,
++        )
++        .unwrap();
++        for frame_no in 1..=conn.wal_frame_count() {
++            let frame = conn.wal_get_frame(frame_no, 4096).unwrap();
++            assert_eq!(frame.len(), FRAME_SIZE);
++            frames.push(frame.to_vec());
++        }
++        assert!(frames.len() > 1);
++    }
++    Fixture { export, frames }
++}
++
++struct Server {
++    connector: ConnectorService,
++    pushed: Arc<Mutex<Vec<u8>>>,
++}
++
++impl Server {
++    fn start(fixture: Fixture) -> Self {
++        let fixture = Arc::new(fixture);
++        let pushed = Arc::new(Mutex::new(Vec::new()));
++        let (tx, mut rx) = tokio::sync::mpsc::channel::<DuplexStream>(16);
++        let connector = ConnectorService::new(MockConnector { tx });
++
++        let pushed_by_server = pushed.clone();
++        tokio::spawn(async move {
++            while let Some(stream) = rx.recv().await {
++                let fixture = fixture.clone();
++                let pushed = pushed_by_server.clone();
++                tokio::spawn(async move {
++                    let service = hyper::service::service_fn(move |req: http::Request<Body>| {
++                        let fixture = fixture.clone();
++                        let pushed = pushed.clone();
++                        async move { Ok::<_, hyper::Error>(answer(&fixture, &pushed, req).await) }
++                    });
++                    let _ = hyper::server::conn::Http::new()
++                        .serve_connection(stream, service)
++                        .await;
++                });
++            }
++        });
++        Self { connector, pushed }
++    }
++
++    fn url(&self) -> String {
++        "http://sync.test".to_string()
++    }
++
++    fn pushed(&self) -> Vec<u8> {
++        self.pushed.lock().unwrap().clone()
++    }
++}
++
++async fn answer(fixture: &Fixture, pushed: &Mutex<Vec<u8>>, req: http::Request<Body>) -> http::Response<Body> {
++    let reply = |status: u16, body: Vec<u8>| {
++        http::Response::builder().status(status).body(Body::from(body)).unwrap()
++    };
++    let path = req.uri().path().to_string();
++    let method = req.method().clone();
++    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
++    match (method.as_str(), parts.as_slice()) {
++        ("GET", ["info"]) => reply(200, br#"{"current_generation":1}"#.to_vec()),
++        ("GET", ["export", "1"]) => reply(200, fixture.export.clone()),
++        ("GET", ["sync", "1", start, end]) => {
++            let start: usize = start.parse().unwrap();
++            let end: usize = end.parse().unwrap();
++            if start == 0 || start > fixture.frames.len() {
++                return reply(400, br#"{"generation":1}"#.to_vec());
++            }
++            let last = end.min(fixture.frames.len() + 1);
++            reply(200, fixture.frames[start - 1..last - 1].concat())
++        }
++        ("POST", ["sync", "1", _start, end, ..]) => {
++            let end: u32 = end.parse().unwrap();
++            let body = hyper::body::to_bytes(req.into_body()).await.unwrap();
++            pushed.lock().unwrap().extend_from_slice(&body);
++            let json = format!(r#"{{"status":"ok","generation":1,"max_frame_no":{}}}"#, end - 1);
++            reply(200, json.into_bytes())
++        }
++        _ => reply(404, b"not found".to_vec()),
++    }
++}
++
++#[derive(Clone)]
++struct MockConnector {
++    tx: tokio::sync::mpsc::Sender<DuplexStream>,
++}
++
++impl Service<http::Uri> for MockConnector {
++    type Response = Box<dyn Socket>;
++    type Error = Box<dyn std::error::Error + Send + Sync>;
++    type Future = Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
++
++    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
++        Poll::Ready(Ok(()))
++    }
++
++    fn call(&mut self, _: http::Uri) -> Self::Future {
++        let (stream, server_stream) = duplex(1 << 16);
++        let tx = self.tx.clone();
++        Box::pin(async move {
++            tx.send(server_stream).await.map_err(|e| e.to_string())?;
++            Ok(Box::new(MockConnection { stream }) as Box<dyn Socket>)
++        })
++    }
++}
++
++struct MockConnection {
++    stream: DuplexStream,
++}
++
++impl AsyncRead for MockConnection {
++    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
++        Pin::new(&mut self.stream).poll_read(cx, buf)
++    }
++}
++
++impl AsyncWrite for MockConnection {
++    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
++        Pin::new(&mut self.stream).poll_write(cx, buf)
++    }
++    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
++        Pin::new(&mut self.stream).poll_flush(cx)
++    }
++    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
++        Pin::new(&mut self.stream).poll_shutdown(cx)
++    }
++}
++
++impl hyper::client::connect::Connection for MockConnection {
++    fn connected(&self) -> hyper::client::connect::Connected {
++        hyper::client::connect::Connected::new()
++    }
++}
++
++fn header(path: &Path) -> Vec<u8> {
++    let bytes = std::fs::read(path).unwrap();
++    bytes[..16].to_vec()
++}
++
++fn contains(haystack: &[u8], needle: &str) -> bool {
++    haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
++}
++
++/// Every file in `dir` with the markers it holds in plaintext.
++fn plaintext_markers(dir: &Path, markers: &[&str]) -> Vec<String> {
++    let mut found = Vec::new();
++    for entry in std::fs::read_dir(dir).unwrap() {
++        let entry = entry.unwrap();
++        if !entry.file_type().unwrap().is_file() {
++            continue;
++        }
++        let bytes = std::fs::read(entry.path()).unwrap();
++        for marker in markers {
++            if contains(&bytes, marker) {
++                found.push(format!("{} holds {marker}", entry.file_name().to_string_lossy()));
++            }
++        }
++    }
++    found
++}
++
++fn file_names(dir: &Path) -> Vec<String> {
++    let mut names: Vec<String> = std::fs::read_dir(dir)
++        .unwrap()
++        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
++        .collect();
++    names.sort();
++    names
++}
++
++async fn count_local(path: &Path, key: Option<EncryptionConfig>, like: &str) -> crate::Result<i64> {
++    let mut builder = Builder::new_local(path);
++    if let Some(key) = key {
++        builder = builder.encryption_config(key);
++    }
++    let db = builder.build().await?;
++    let conn = db.connect()?;
++    let mut rows = conn
++        .query(&format!("SELECT count(*) FROM t WHERE x LIKE '{like}%'"), ())
++        .await?;
++    let row = rows.next().await?.expect("count row");
++    Ok(row.get::<i64>(0)?)
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn keyed_remote_replica_on_the_http_sync_path_is_encrypted_at_rest() {
++    let server = Server::start(fixture(true));
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("replica.db");
++
++    let db = Builder::new_remote_replica(&path, server.url(), "token".to_string())
++        .connector(server.connector.clone())
++        .encryption_config(key())
++        .build()
++        .await
++        .unwrap();
++    db.sync().await.unwrap();
++    {
++        let conn = db.connect().unwrap();
++        let mut rows = conn.query("SELECT count(*) FROM t", ()).await.unwrap();
++        let row = rows.next().await.unwrap().unwrap();
++        assert_eq!(row.get::<i64>(0).unwrap(), 600, "export rows and pulled frame rows");
++    }
++    drop(db);
++
++    let names = file_names(dir.path());
++    assert!(names.contains(&"replica.db-info".to_string()), "the HTTP sync path ran: {names:?}");
++    assert_ne!(&header(&path)[..], &SQLITE_HEADER[..], "the replica file is plaintext");
++    let leaks = plaintext_markers(dir.path(), &[EXPORT_MARKER, FRAME_MARKER]);
++    assert!(leaks.is_empty(), "plaintext rows on disk: {leaks:?} (files {names:?})");
++
++    assert_eq!(count_local(&path, Some(key()), EXPORT_MARKER).await.unwrap(), 300);
++    assert_eq!(count_local(&path, Some(key()), FRAME_MARKER).await.unwrap(), 300);
++    assert!(count_local(&path, None, EXPORT_MARKER).await.is_err(), "opened without the key");
++    assert!(count_local(&path, Some(wrong_key()), EXPORT_MARKER).await.is_err(), "opened with another key");
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn keyed_remote_replica_reopens_with_its_key_and_not_without() {
++    let server = Server::start(fixture(true));
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("replica.db");
++    {
++        let db = Builder::new_remote_replica(&path, server.url(), "token".to_string())
++            .connector(server.connector.clone())
++            .encryption_config(key())
++            .build()
++            .await
++            .unwrap();
++        db.sync().await.unwrap();
++    }
++
++    {
++        let db = Builder::new_remote_replica(&path, server.url(), "token".to_string())
++            .connector(server.connector.clone())
++            .encryption_config(key())
++            .build()
++            .await
++            .unwrap();
++        db.sync().await.unwrap();
++        let conn = db.connect().unwrap();
++        let mut rows = conn.query("SELECT count(*) FROM t", ()).await.unwrap();
++        let row = rows.next().await.unwrap().unwrap();
++        assert_eq!(row.get::<i64>(0).unwrap(), 600);
++    }
++    assert_ne!(&header(&path)[..], &SQLITE_HEADER[..]);
++
++    let unkeyed = Builder::new_remote_replica(&path, server.url(), "token".to_string())
++        .connector(server.connector.clone())
++        .build()
++        .await
++        .unwrap();
++    assert!(unkeyed.connect().is_err(), "a reopen without the key reads the file");
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn unkeyed_remote_replica_on_the_http_sync_path_stays_plaintext() {
++    let server = Server::start(fixture(true));
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("replica.db");
++    let db = Builder::new_remote_replica(&path, server.url(), "token".to_string())
++        .connector(server.connector.clone())
++        .build()
++        .await
++        .unwrap();
++    db.sync().await.unwrap();
++    drop(db);
++    assert_eq!(&header(&path)[..], &SQLITE_HEADER[..]);
++    assert!(!plaintext_markers(dir.path(), &[EXPORT_MARKER]).is_empty());
++    assert_eq!(count_local(&path, None, FRAME_MARKER).await.unwrap(), 300);
++}
++
++#[tokio::test(flavor = "multi_thread")]
++async fn keyed_synced_database_pushes_unencrypted_pages_and_keeps_its_own_encrypted() {
++    let server = Server::start(fixture(false));
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("offline.db");
++    let db = Builder::new_synced_database(&path, server.url(), "token".to_string())
++        .connector(server.connector.clone())
++        .encryption_config(key())
++        .build()
++        .await
++        .unwrap();
++    {
++        let conn = db.connect().unwrap();
++        conn.execute(&format!("INSERT INTO t(x) VALUES ('{PUSH_MARKER}')"), ())
++            .await
++            .unwrap();
++    }
++    db.sync().await.unwrap();
++    drop(db);
++
++    let pushed = server.pushed();
++    assert!(!pushed.is_empty() && pushed.len() % FRAME_SIZE == 0, "pushed {} bytes", pushed.len());
++    assert!(contains(&pushed, PUSH_MARKER), "the pushed frames carry the page encrypted");
++    let leaks = plaintext_markers(dir.path(), &[EXPORT_MARKER, PUSH_MARKER]);
++    assert!(leaks.is_empty(), "plaintext rows on disk: {leaks:?}");
++    assert_ne!(&header(&path)[..], &SQLITE_HEADER[..]);
++    assert_eq!(count_local(&path, Some(key()), PUSH_MARKER).await.unwrap(), 1);
++}
++
++#[test]
++fn an_export_that_is_not_a_database_is_refused_and_leaves_no_file() {
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("replica.db");
++    let path = path.to_str().unwrap();
++    let export = fixture(false).export;
++    assert!(super::write_encrypted_export(path, b"not a database", &key()).is_err());
++    let mut foreign = export.clone();
++    foreign[0] ^= 0xff;
++    assert!(super::write_encrypted_export(path, &foreign, &key()).is_err(), "a file without the SQLite header");
++    let mut torn = export.clone();
++    torn.truncate(torn.len() - 100);
++    assert!(super::write_encrypted_export(path, &torn, &key()).is_err(), "a file that ends inside a page");
++    assert!(file_names(dir.path()).is_empty(), "{:?}", file_names(dir.path()));
++}
++
++#[test]
++fn an_encrypted_export_holds_the_exported_pages_by_number() {
++    let dir = tempdir().unwrap();
++    let path = dir.path().join("replica.db");
++    let export = fixture(false).export;
++    super::write_encrypted_export(path.to_str().unwrap(), &export, &key()).unwrap();
++    assert_eq!(file_names(dir.path()), vec!["replica.db".to_string()]);
++    let written = std::fs::read(&path).unwrap();
++    assert_eq!(written.len(), export.len(), "one encrypted page per exported page");
++    assert_ne!(&written[..16], &SQLITE_HEADER[..]);
++    assert!(!contains(&written, EXPORT_MARKER));
++
++    let mut db = crate::local::Database::new(path.to_str().unwrap().to_string(), OpenFlags::SQLITE_OPEN_READ_ONLY);
++    db.encryption_config = Some(key());
++    let conn = db.connect().unwrap();
++    let one = |sql: &str| -> crate::Value {
++        let rows = conn.query(sql, Params::None).unwrap().unwrap();
++        let row = rows.next().unwrap().unwrap();
++        row.get_value(0).unwrap()
++    };
++    assert_eq!(one("PRAGMA integrity_check"), crate::Value::Text("ok".to_string()));
++    assert_eq!(one("PRAGMA page_count"), crate::Value::Integer((export.len() / 4096) as i64));
++    assert_eq!(
++        one(&format!("SELECT count(*) FROM t WHERE x LIKE '{EXPORT_MARKER}%'")),
++        crate::Value::Integer(300)
++    );
++}

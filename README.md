@@ -21,6 +21,11 @@ The script's `strip` step removes the LLVM bitcode sections Rust's standard libr
 archive, and the windows archive's `.drectve` linker directives (DLL export lists, some of which Go
 refuses), because Go 1.27.4 and later refuse to link an archive carrying them from the module cache or
 from under the build directory; its `verify` step links a probe with Go 1.27.4 in both of those layouts.
+The script builds libSQL with the patches in `scripts/libsql-patches`: a replica on libSQL's HTTP sync
+path (the one it takes whenever the primary answers `/info`) is encrypted at rest with the key it is opened
+with (its database file, its WAL and the file downloaded at bootstrap), an offline-writes database pushes
+its pages unencrypted, and the C binding exports `libsql_complete`, which the statement splitter calls.
+Its `encrypted` step runs the tests that open keyed databases of an in-process HTTP sync primary.
 
 ## Features
 

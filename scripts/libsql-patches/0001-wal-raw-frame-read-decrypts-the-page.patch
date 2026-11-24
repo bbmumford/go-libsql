@@ -1,0 +1,60 @@
+diff --git a/libsql-ffi/bundled/src/sqlite3.c b/libsql-ffi/bundled/src/sqlite3.c
+index 8dc3ca8..d7e9c57 100644
+--- a/libsql-ffi/bundled/src/sqlite3.c
++++ b/libsql-ffi/bundled/src/sqlite3.c
+@@ -68976,8 +68976,23 @@ static int sqlite3WalReadFrameRaw(
+   testcase( sz>=65536 );
+   iOffset = walFrameOffset(iRead, sz);
+   /* testcase( IS_BIG_INT(iOffset) ); // requires a 4GiB WAL */
+-  sz += WAL_FRAME_HDRSIZE;
+-  return sqlite3OsRead(pWal->pWalFd, pOut, (nOut>sz ? sz : nOut), iOffset);
++  /* The frame header and the page are read as two reads, because the
++  ** encrypting VFS of the encryption build (SQLite3 Multiple Ciphers,
++  ** mcReadWal) decrypts a WAL read only when it is exactly one page long:
++  ** read whole, the frame of an encrypted database comes back with its page
++  ** still encrypted, and libsql_wal_get_frame's caller, the offline sync
++  ** push, sends the frame to a server that stores its pages unencrypted.
++  ** On a database without encryption the two reads return the same bytes
++  ** as one. */
++  if( nOut<=WAL_FRAME_HDRSIZE ){
++    return sqlite3OsRead(pWal->pWalFd, pOut, nOut, iOffset);
++  }else{
++    int rc = sqlite3OsRead(pWal->pWalFd, pOut, WAL_FRAME_HDRSIZE, iOffset);
++    int nPage = nOut-WAL_FRAME_HDRSIZE;
++    if( rc!=SQLITE_OK ) return rc;
++    return sqlite3OsRead(pWal->pWalFd, pOut+WAL_FRAME_HDRSIZE,
++                         (nPage>sz ? sz : nPage), iOffset+WAL_FRAME_HDRSIZE);
++  }
+ }
+ 
+ /*
+diff --git a/libsql-sqlite3/src/wal.c b/libsql-sqlite3/src/wal.c
+index 7d0f2a1..ee0235a 100644
+--- a/libsql-sqlite3/src/wal.c
++++ b/libsql-sqlite3/src/wal.c
+@@ -3421,8 +3421,23 @@ static int sqlite3WalReadFrameRaw(
+   testcase( sz>=65536 );
+   iOffset = walFrameOffset(iRead, sz);
+   /* testcase( IS_BIG_INT(iOffset) ); // requires a 4GiB WAL */
+-  sz += WAL_FRAME_HDRSIZE;
+-  return sqlite3OsRead(pWal->pWalFd, pOut, (nOut>sz ? sz : nOut), iOffset);
++  /* The frame header and the page are read as two reads, because the
++  ** encrypting VFS of the encryption build (SQLite3 Multiple Ciphers,
++  ** mcReadWal) decrypts a WAL read only when it is exactly one page long:
++  ** read whole, the frame of an encrypted database comes back with its page
++  ** still encrypted, and libsql_wal_get_frame's caller, the offline sync
++  ** push, sends the frame to a server that stores its pages unencrypted.
++  ** On a database without encryption the two reads return the same bytes
++  ** as one. */
++  if( nOut<=WAL_FRAME_HDRSIZE ){
++    return sqlite3OsRead(pWal->pWalFd, pOut, nOut, iOffset);
++  }else{
++    int rc = sqlite3OsRead(pWal->pWalFd, pOut, WAL_FRAME_HDRSIZE, iOffset);
++    int nPage = nOut-WAL_FRAME_HDRSIZE;
++    if( rc!=SQLITE_OK ) return rc;
++    return sqlite3OsRead(pWal->pWalFd, pOut+WAL_FRAME_HDRSIZE,
++                         (nPage>sz ? sz : nPage), iOffset+WAL_FRAME_HDRSIZE);
++  }
+ }
+ 
+ /*

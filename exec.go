@@ -7,7 +7,7 @@ package libsql
 #include <libsql.h>
 #include <stdlib.h>
 
-int sqlite3_complete(const char *sql);
+int libsql_complete(const char *sql);
 */
 import "C"
 
@@ -110,11 +110,12 @@ func (c *conn) execLocal(query string, args []sqldriver.NamedValue) (sqldriver.R
 }
 
 // splitStatements cuts query into the statements SQLite runs one after
-// another. A cut is made after a ';' only where sqlite3_complete, SQLite's own
-// tokenizer, reports the text since the previous cut as a complete statement,
-// so a ';' inside a string literal, a quoted identifier, a comment, or a
-// CREATE TRIGGER ... BEGIN ... END body (CASE ... END inside it included)
-// never cuts. Pieces holding only whitespace, comments and ';' are dropped.
+// another. A cut is made after a ';' only where libsql_complete (SQLite's own
+// tokenizer, sqlite3_complete, in the linked libSQL) reports the text since
+// the previous cut as a complete statement, so a ';' inside a string literal,
+// a quoted identifier, a comment, or a CREATE TRIGGER ... BEGIN ... END body
+// (CASE ... END inside it included) never cuts. Pieces holding only
+// whitespace, comments and ';' are dropped.
 // Text after the last cut that is not blank is kept as the final statement, so
 // a last statement without a ';' still runs, and an unterminated one fails in
 // the engine rather than being dropped here.
@@ -143,7 +144,7 @@ func splitStatements(query string) []string {
 func sqliteComplete(sql string) bool {
 	cs := C.CString(sql)
 	defer C.free(unsafe.Pointer(cs))
-	return C.sqlite3_complete(cs) != 0
+	return C.libsql_complete(cs) != 0
 }
 
 // isBlankSQL reports whether s holds only what SQLite's tokenizer skips

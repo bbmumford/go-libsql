@@ -12,6 +12,11 @@ jobs:
   extract-headers:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout go-libsql
+        uses: actions/checkout@v4
+        with:
+          path: go-libsql
+
       - name: Set libsql tag
         run: |
           TAG=${{ github.event.inputs.libsql_tag }}
@@ -24,6 +29,14 @@ jobs:
           repository: tursodatabase/libsql
           ref: ${{ env.LIBSQL_TAG }}
           path: libsql
+
+      # The archives and the header carry go-libsql's libSQL patches, as
+      # scripts/build-libs.sh builds them.
+      - name: Apply go-libsql's libSQL patches
+        run: |
+          for p in go-libsql/scripts/libsql-patches/*.patch; do
+            git -C libsql apply "$GITHUB_WORKSPACE/$p"
+          done
 
       - name: Extract headers
         run: |
@@ -65,6 +78,14 @@ jobs:
           repository: tursodatabase/libsql
           ref: ${{ env.LIBSQL_TAG }}
           path: libsql
+
+      # The archives and the header carry go-libsql's libSQL patches, as
+      # scripts/build-libs.sh builds them.
+      - name: Apply go-libsql's libSQL patches
+        run: |
+          for p in go-libsql/scripts/libsql-patches/*.patch; do
+            git -C libsql apply "$GITHUB_WORKSPACE/$p"
+          done
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -115,6 +136,14 @@ jobs:
           repository: tursodatabase/libsql
           ref: ${{ env.LIBSQL_TAG }}
           path: libsql
+
+      # The archives and the header carry go-libsql's libSQL patches, as
+      # scripts/build-libs.sh builds them.
+      - name: Apply go-libsql's libSQL patches
+        run: |
+          for p in go-libsql/scripts/libsql-patches/*.patch; do
+            git -C libsql apply "$GITHUB_WORKSPACE/$p"
+          done
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

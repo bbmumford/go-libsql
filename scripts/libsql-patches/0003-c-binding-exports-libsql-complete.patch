@@ -1,0 +1,38 @@
+diff --git a/bindings/c/include/libsql.h b/bindings/c/include/libsql.h
+index 5a43eaa..9f29af6 100644
+--- a/bindings/c/include/libsql.h
++++ b/bindings/c/include/libsql.h
+@@ -167,6 +167,8 @@ void libsql_free_row(libsql_row_t res);
+ 
+ int libsql_get_string(libsql_row_t res, int col, const char **out_value, const char **out_err_msg);
+ 
++int libsql_complete(const char *sql);
++
+ void libsql_free_string(const char *ptr);
+ 
+ int libsql_get_int(libsql_row_t res, int col, long long *out_value, const char **out_err_msg);
+diff --git a/bindings/c/src/lib.rs b/bindings/c/src/lib.rs
+index 0a46474..875d01a 100644
+--- a/bindings/c/src/lib.rs
++++ b/bindings/c/src/lib.rs
+@@ -1133,6 +1133,20 @@ pub unsafe extern "C" fn libsql_get_string(
+     }
+ }
+ 
++// Returns 1 when `sql` (NUL-terminated UTF-8) ends with a complete SQL
++// statement and 0 otherwise, by SQLite's sqlite3_complete in the SQLite this
++// library links: a caller cutting a multi-statement string at ';' needs that
++// tokenizer, and the shared library exports only the libsql_* functions, so
++// a caller of it declaring sqlite3_complete binds whichever system SQLite the
++// process loads, or none. A null `sql` returns 0.
++#[no_mangle]
++pub unsafe extern "C" fn libsql_complete(sql: *const std::ffi::c_char) -> std::ffi::c_int {
++    if sql.is_null() {
++        return 0;
++    }
++    unsafe { libsql::ffi::sqlite3_complete(sql) }
++}
++
+ #[no_mangle]
+ pub unsafe extern "C" fn libsql_free_string(ptr: *const std::ffi::c_char) {
+     if !ptr.is_null() {
