@@ -7,6 +7,9 @@
 *.dll
 *.so
 *.dylib
+# The libSQL shared libraries a build with cgo off embeds.
+!lib/*/libsql_experimental.so
+!lib/*/libsql_experimental.dylib
 
 # Test binary, built with `go test -c`
 *.test

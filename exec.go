@@ -1,22 +1,10 @@
-//go:build cgo
-// +build cgo
-
 package libsql
-
-/*
-#include <libsql.h>
-#include <stdlib.h>
-
-int libsql_complete(const char *sql);
-*/
-import "C"
 
 import (
 	"context"
 	sqldriver "database/sql/driver"
 	"fmt"
 	"strings"
-	"unsafe"
 )
 
 // ExecContext runs every statement in query, in order, on this connection and
@@ -70,10 +58,10 @@ func (c *conn) execOne(query string, args []sqldriver.NamedValue) (sqldriver.Res
 	if err != nil {
 		return nil, err
 	}
-	id := int64(C.libsql_last_insert_rowid(c.nativePtr))
-	changes := int64(C.libsql_changes(c.nativePtr))
+	id := nLastInsertRowID(c.nativePtr)
+	changes := nChanges(c.nativePtr)
 	if rows != nil {
-		C.libsql_free_rows(rows)
+		nFreeRows(rows)
 	}
 	return execResult{id, changes}, nil
 }
@@ -91,21 +79,20 @@ func (c *conn) execLocal(query string, args []sqldriver.NamedValue) (sqldriver.R
 		return nil, err
 	}
 	if rows != nil {
-		defer C.libsql_free_rows(rows)
+		defer nFreeRows(rows)
 		for {
-			var row C.libsql_row_t
-			var errMsg *C.char
-			if status := C.libsql_next_row(rows, &row, &errMsg); status != 0 {
-				return nil, libsqlError(fmt.Sprint("failed to execute query ", query), status, errMsg)
+			row, e := nNextRow(rows)
+			if e != nil {
+				return nil, libsqlError(fmt.Sprint("failed to execute query ", query), e)
 			}
 			if row == nil {
 				break
 			}
-			C.libsql_free_row(row)
+			nFreeRow(row)
 		}
 	}
-	id := int64(C.libsql_last_insert_rowid(c.nativePtr))
-	changes := int64(C.libsql_changes(c.nativePtr))
+	id := nLastInsertRowID(c.nativePtr)
+	changes := nChanges(c.nativePtr)
 	return execResult{id, changes}, nil
 }
 
@@ -141,11 +128,7 @@ func splitStatements(query string) []string {
 	return out
 }
 
-func sqliteComplete(sql string) bool {
-	cs := C.CString(sql)
-	defer C.free(unsafe.Pointer(cs))
-	return C.libsql_complete(cs) != 0
-}
+func sqliteComplete(sql string) bool { return nComplete(sql) }
 
 // isBlankSQL reports whether s holds only what SQLite's tokenizer skips
 // between statements: whitespace, "--" line comments, "/* */" block comments

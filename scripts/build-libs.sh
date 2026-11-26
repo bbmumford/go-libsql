@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Builds the libSQL C-binding static libraries that libsql.go links:
-# lib/<goos>_<goarch>/libsql_experimental.a and lib/include/libsql.h.
+# Builds the libSQL C-binding static libraries that native_cgo.go links,
+# lib/<goos>_<goarch>/libsql_experimental.a and lib/include/libsql.h, and,
+# from the same cargo build (the crate builds a cdylib beside its staticlib),
+# the shared libraries a build with cgo off embeds and loads (embed_*.go):
+# lib/<goos>_<goarch>/libsql_experimental.dylib or .so.
 #
 # Consumes: a checkout of github.com/tursodatabase/libsql at LIBSQL_TAG
 # (LIBSQL_SRC); rustup, which installs the toolchain pinned by the checkout's
 # rust-toolchain.toml; the Xcode command-line tools for the darwin targets;
 # docker for the linux and windows targets.
-# Consumed by: the #cgo LDFLAGS lines of libsql.go
-# (-L${SRCDIR}/lib/<goos>_<goarch> -lsql_experimental).
+# Consumed by: the #cgo LDFLAGS lines of native_cgo.go
+# (-L${SRCDIR}/lib/<goos>_<goarch> -lsql_experimental), and the go:embed line
+# and SHA-256 of each embed_<goos>_<goarch>.go, which are rewritten here when
+# a shared library is copied (update_embed).
 #
 # Conditions:
 #   - Refuses to build while the data volume has less than MIN_FREE_GIB free,
@@ -200,6 +205,18 @@ build_darwin() {
 	)
 	mkdir -p "$REPO/lib/$out"
 	cp "$tdir/$target/release/libsql_experimental.a" "$REPO/lib/$out/libsql_experimental.a"
+	cp "$tdir/$target/release/libsql_experimental.dylib" "$REPO/lib/$out/libsql_experimental.dylib"
+	update_embed "$out" dylib
+}
+
+# update_embed <lib dir name> <extension> sets the SHA-256 that
+# embed_<lib dir name>.go names to the shared library just copied, so a build
+# with cgo off refuses any other bytes.
+update_embed() {
+	local out="$1" ext="$2" sum
+	sum=$(shasum -a 256 "$REPO/lib/$out/libsql_experimental.$ext" | cut -d' ' -f1)
+	perl -pi -e "s/^(\tembeddedSHA256 += \")[0-9a-f]*\"/\${1}$sum\"/" "$REPO/embed_$out.go"
+	grep -q "embeddedSHA256  = \"$sum\"" "$REPO/embed_$out.go" || { echo "FAIL embed_$out.go does not name $sum"; return 1; }
 }
 
 # Both linux archives come from one arm64 bookworm container: aarch64
@@ -227,6 +244,10 @@ build_linux() {
 	mkdir -p "$REPO/lib/linux_arm64" "$REPO/lib/linux_amd64"
 	cp "$WORK/target-linux/release/libsql_experimental.a" "$REPO/lib/linux_arm64/"
 	cp "$WORK/target-linux/x86_64-unknown-linux-gnu/release/libsql_experimental.a" "$REPO/lib/linux_amd64/"
+	cp "$WORK/target-linux/release/libsql_experimental.so" "$REPO/lib/linux_arm64/"
+	cp "$WORK/target-linux/x86_64-unknown-linux-gnu/release/libsql_experimental.so" "$REPO/lib/linux_amd64/"
+	update_embed linux_arm64 so
+	update_embed linux_amd64 so
 }
 
 # The windows_amd64 archive comes from the linux image with Debian's

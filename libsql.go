@@ -1,24 +1,4 @@
-//go:build cgo
-// +build cgo
-
 package libsql
-
-/*
-#cgo CFLAGS: -I${SRCDIR}/lib/include
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/lib/darwin_amd64
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib/darwin_arm64
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux_amd64
-#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/lib/linux_arm64
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/lib/windows_amd64
-#cgo LDFLAGS: -lsql_experimental
-#cgo LDFLAGS: -lm
-#cgo darwin LDFLAGS: -framework Security
-#cgo darwin LDFLAGS: -framework CoreFoundation
-#cgo windows LDFLAGS: -lws2_32 -luserenv -lbcrypt -lntdll -lcrypt32 -lsecur32 -lncrypt
-#include <libsql.h>
-#include <stdlib.h>
-*/
-import "C"
 
 import (
 	"context"
@@ -31,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/antlr4-go/antlr/v4"
 	"github.com/libsql/sqlite-antlr4-parser/sqliteparser"
@@ -258,15 +237,12 @@ func (d driver) OpenConnector(dbAddress string) (sqldriver.Connector, error) {
 	return nil, fmt.Errorf("unsupported URL scheme: %s\nThis driver supports only URLs that start with libsql://, file:, https:// or http://", u.Scheme)
 }
 
-func libsqlSync(nativeDbPtr C.libsql_database_t) (Replicated, error) {
-	var errMsg *C.char
-	var rep C.replicated
-	statusCode := C.libsql_sync2(nativeDbPtr, &rep, &errMsg)
-	if statusCode != 0 {
-		return Replicated{0, 0}, libsqlError("failed to sync database ", statusCode, errMsg)
+func libsqlSync(nativeDbPtr dbHandle) (Replicated, error) {
+	rep, e := nSync(nativeDbPtr)
+	if e != nil {
+		return Replicated{0, 0}, libsqlError("failed to sync database ", e)
 	}
-
-	return Replicated{FrameNo: int(rep.frame_no), FramesSynced: int(rep.frames_synced)}, nil
+	return rep, nil
 }
 
 func openLocalConnector(dbPath string) (*Connector, error) {
@@ -293,7 +269,7 @@ func openSyncConnector(dbPath, primaryUrl, authToken string, readYourWrites bool
 		return nil, err
 	}
 	if _, err := libsqlSync(nativeDbPtr); err != nil {
-		C.libsql_close(nativeDbPtr)
+		nClose(nativeDbPtr)
 		return nil, err
 	}
 	if syncInterval != 0 {
@@ -322,7 +298,7 @@ func openSyncConnector(dbPath, primaryUrl, authToken string, readYourWrites bool
 }
 
 type Connector struct {
-	nativeDbPtr C.libsql_database_t
+	nativeDbPtr dbHandle
 	closeCh     chan<- struct{}
 	closeAckCh  <-chan struct{}
 	// local marks a database with no primary (file: and :memory: opens and
@@ -347,7 +323,7 @@ func (c *Connector) Close() error {
 		c.closeAckCh = nil
 	}
 	if c.nativeDbPtr != nil {
-		C.libsql_close(c.nativeDbPtr)
+		nClose(c.nativeDbPtr)
 	}
 	c.nativeDbPtr = nil
 	return nil
@@ -361,7 +337,7 @@ func (c *Connector) Connect(ctx context.Context) (sqldriver.Conn, error) {
 	cn := &conn{nativePtr: nativeConnPtr, local: c.local, opts: c.opts}
 	if c.setup != nil {
 		if err := c.setup.prepare(cn); err != nil {
-			C.libsql_disconnect(nativeConnPtr)
+			nDisconnect(nativeConnPtr)
 			return nil, err
 		}
 	}
@@ -372,117 +348,43 @@ func (c *Connector) Driver() sqldriver.Driver {
 	return driver{}
 }
 
-func libsqlError(message string, statusCode C.int, errMsg *C.char) error {
-	code := int(statusCode)
-	if errMsg != nil {
-		msg := C.GoString(errMsg)
-		C.libsql_free_string(errMsg)
-		return fmt.Errorf("%s\nerror code = %d: %v", message, code, msg)
-	} else {
-		return fmt.Errorf("%s\nerror code = %d", message, code)
-	}
-}
-
-func libsqlOpenLocal(dataSourceName string) (C.libsql_database_t, error) {
-	connectionString := C.CString(dataSourceName)
-	defer C.free(unsafe.Pointer(connectionString))
-
-	var db C.libsql_database_t
-	var errMsg *C.char
-	statusCode := C.libsql_open_file(connectionString, &db, &errMsg)
-	if statusCode != 0 {
-		return nil, libsqlError(fmt.Sprint("failed to open local database ", dataSourceName), statusCode, errMsg)
+func libsqlOpenLocal(dataSourceName string) (dbHandle, error) {
+	db, e := nOpenFile(dataSourceName)
+	if e != nil {
+		return nil, libsqlError(fmt.Sprint("failed to open local database ", dataSourceName), e)
 	}
 	return db, nil
 }
 
-func libsqlOpenRemote(url, authToken, remoteEncryptionKey string) (C.libsql_database_t, error) {
-	connectionString := C.CString(url)
-	defer C.free(unsafe.Pointer(connectionString))
-	authTokenNativeString := C.CString(authToken)
-	defer C.free(unsafe.Pointer(authTokenNativeString))
-
-	var remoteEncryptionKeyNativeString *C.char
-	if remoteEncryptionKey != "" {
-		remoteEncryptionKeyNativeString = C.CString(remoteEncryptionKey)
-		defer C.free(unsafe.Pointer(remoteEncryptionKeyNativeString))
-	}
-
-	var db C.libsql_database_t
-	var errMsg *C.char
-	var statusCode C.int
-	if remoteEncryptionKey == "" {
-		statusCode = C.libsql_open_remote(connectionString, authTokenNativeString, &db, &errMsg)
-	} else {
-		statusCode = C.libsql_open_remote_with_remote_encryption(connectionString, authTokenNativeString, remoteEncryptionKeyNativeString, &db, &errMsg)
-	}
-	if statusCode != 0 {
-		return nil, libsqlError(fmt.Sprint("failed to open remote database ", url), statusCode, errMsg)
+func libsqlOpenRemote(url, authToken, remoteEncryptionKey string) (dbHandle, error) {
+	db, e := nOpenRemote(url, authToken, remoteEncryptionKey)
+	if e != nil {
+		return nil, libsqlError(fmt.Sprint("failed to open remote database ", url), e)
 	}
 	return db, nil
 }
 
-func libsqlOpenWithSync(dbPath, primaryUrl, authToken string, readYourWrites bool, encryptionKey string, remoteEncrytionKey string, offline bool) (C.libsql_database_t, error) {
-	dbPathNativeString := C.CString(dbPath)
-	defer C.free(unsafe.Pointer(dbPathNativeString))
-	primaryUrlNativeString := C.CString(primaryUrl)
-	defer C.free(unsafe.Pointer(primaryUrlNativeString))
-	authTokenNativeString := C.CString(authToken)
-	defer C.free(unsafe.Pointer(authTokenNativeString))
-
-	var readYourWritesNative C.char = 0
-	if readYourWrites {
-		readYourWritesNative = 1
-	}
-
-	var offlineNative C.char = 0
-	if offline {
-		offlineNative = 1
-	}
-
-	var encrytionKeyNativeString *C.char
-	if encryptionKey != "" {
-		encrytionKeyNativeString = C.CString(encryptionKey)
-		defer C.free(unsafe.Pointer(encrytionKeyNativeString))
-	}
-
-	var remoteEncrytionKeyNativeString *C.char
-	if remoteEncrytionKey != "" {
-		remoteEncrytionKeyNativeString = C.CString(remoteEncrytionKey)
-		defer C.free(unsafe.Pointer(remoteEncrytionKeyNativeString))
-	}
-
-	config := C.libsql_config{
-		db_path:               dbPathNativeString,
-		auth_token:            authTokenNativeString,
-		primary_url:           primaryUrlNativeString,
-		read_your_writes:      readYourWritesNative,
-		encryption_key:        encrytionKeyNativeString,
-		remote_encryption_key: remoteEncrytionKeyNativeString,
-		offline:               offlineNative,
-	}
-
-	var db C.libsql_database_t
-	var errMsg *C.char
-	statusCode := C.libsql_open_sync_with_config(config, &db, &errMsg)
-	if statusCode != 0 {
-		return nil, libsqlError(fmt.Sprintf("failed to open database %s %s", dbPath, primaryUrl), statusCode, errMsg)
+func libsqlOpenWithSync(dbPath, primaryUrl, authToken string, readYourWrites bool, encryptionKey string, remoteEncrytionKey string, offline bool) (dbHandle, error) {
+	db, e := nOpenSync(syncConfig{
+		path: dbPath, primaryURL: primaryUrl, authToken: authToken, readYourWrites: readYourWrites,
+		encryptionKey: encryptionKey, remoteEncryptionKey: remoteEncrytionKey, offline: offline,
+	})
+	if e != nil {
+		return nil, libsqlError(fmt.Sprintf("failed to open database %s %s", dbPath, primaryUrl), e)
 	}
 	return db, nil
 }
 
-func libsqlConnect(db C.libsql_database_t) (C.libsql_connection_t, error) {
-	var conn C.libsql_connection_t
-	var errMsg *C.char
-	statusCode := C.libsql_connect(db, &conn, &errMsg)
-	if statusCode != 0 {
-		return nil, libsqlError("failed to connect to database", statusCode, errMsg)
+func libsqlConnect(db dbHandle) (connHandle, error) {
+	conn, e := nConnect(db)
+	if e != nil {
+		return nil, libsqlError("failed to connect to database", e)
 	}
 	return conn, nil
 }
 
 type conn struct {
-	nativePtr C.libsql_connection_t
+	nativePtr connHandle
 	local     bool
 	opts      connOptions
 	// readTx is whether a read transaction is open, as libSQL's replica
@@ -499,7 +401,7 @@ func (c *conn) Begin() (sqldriver.Tx, error) {
 }
 
 func (c *conn) Close() error {
-	C.libsql_disconnect(c.nativePtr)
+	nDisconnect(c.nativePtr)
 	return nil
 }
 
@@ -617,25 +519,21 @@ func (c *conn) BeginTx(ctx context.Context, opts sqldriver.TxOptions) (sqldriver
 	return &tx{c}, nil
 }
 
-func (c *conn) executeNoArgs(query string, exec bool) (C.libsql_rows_t, error) {
-	queryCString := C.CString(query)
-	defer C.free(unsafe.Pointer(queryCString))
-
-	var rows C.libsql_rows_t
-	var errMsg *C.char
-	var statusCode C.int
+func (c *conn) executeNoArgs(query string, exec bool) (rowsHandle, error) {
+	var rows rowsHandle
+	var e *nativeErr
 	if exec {
-		statusCode = C.libsql_execute(c.nativePtr, queryCString, &errMsg)
+		e = nExecute(c.nativePtr, query)
 	} else {
-		statusCode = C.libsql_query(c.nativePtr, queryCString, &rows, &errMsg)
+		rows, e = nQuery(c.nativePtr, query)
 	}
-	if statusCode != 0 {
-		return nil, libsqlError(fmt.Sprint("failed to execute query ", query), statusCode, errMsg)
+	if e != nil {
+		return nil, libsqlError(fmt.Sprint("failed to execute query ", query), e)
 	}
 	return rows, nil
 }
 
-func (c *conn) execute(query string, args []sqldriver.NamedValue, exec bool) (C.libsql_rows_t, error) {
+func (c *conn) execute(query string, args []sqldriver.NamedValue, exec bool) (rowsHandle, error) {
 	// The C binding binds by position only: a sql.Named value would bind in
 	// argument order whatever its name (SELECT :b - :a with a=2, b=40 returns
 	// -38). A name is refused rather than bound to the wrong parameter.
@@ -647,65 +545,50 @@ func (c *conn) execute(query string, args []sqldriver.NamedValue, exec bool) (C.
 	if len(args) == 0 {
 		return c.executeNoArgs(query, exec)
 	}
-	queryCString := C.CString(query)
-	defer C.free(unsafe.Pointer(queryCString))
-
-	var stmt C.libsql_stmt_t
-	var errMsg *C.char
-	statusCode := C.libsql_prepare(c.nativePtr, queryCString, &stmt, &errMsg)
-	if statusCode != 0 {
-		return nil, libsqlError(fmt.Sprint("failed to prepare query ", query), statusCode, errMsg)
+	stmt, e := nPrepare(c.nativePtr, query)
+	if e != nil {
+		return nil, libsqlError(fmt.Sprint("failed to prepare query ", query), e)
 	}
-	defer C.libsql_free_stmt(stmt)
+	defer nFreeStmt(stmt)
 
 	for _, arg := range args {
-		var errMsg *C.char
-		var statusCode C.int
+		var e *nativeErr
 		idx := arg.Ordinal
-		switch arg.Value.(type) {
+		switch v := arg.Value.(type) {
 		case int64:
-			statusCode = C.libsql_bind_int(stmt, C.int(idx), C.longlong(arg.Value.(int64)), &errMsg)
+			e = nBindInt(stmt, idx, v)
 		case float64:
-			statusCode = C.libsql_bind_float(stmt, C.int(idx), C.double(arg.Value.(float64)), &errMsg)
+			e = nBindFloat(stmt, idx, v)
 		case []byte:
-			blob := arg.Value.([]byte)
-			nativeBlob := C.CBytes(blob)
-			statusCode = C.libsql_bind_blob(stmt, C.int(idx), (*C.uchar)(nativeBlob), C.int(len(blob)), &errMsg)
-			C.free(nativeBlob)
+			e = nBindBlob(stmt, idx, v)
 		case string:
-			valueStr := C.CString(arg.Value.(string))
-			statusCode = C.libsql_bind_string(stmt, C.int(idx), valueStr, &errMsg)
-			C.free(unsafe.Pointer(valueStr))
+			e = nBindString(stmt, idx, v)
 		case nil:
-			statusCode = C.libsql_bind_null(stmt, C.int(idx), &errMsg)
+			e = nBindNull(stmt, idx)
 		case bool:
-			var valueInt int
-			if arg.Value.(bool) {
+			var valueInt int64
+			if v {
 				valueInt = 1
-			} else {
-				valueInt = 0
 			}
-			statusCode = C.libsql_bind_int(stmt, C.int(idx), C.longlong(valueInt), &errMsg)
+			e = nBindInt(stmt, idx, valueInt)
 		case time.Time:
-			valueStr := C.CString(arg.Value.(time.Time).Format(time.RFC3339Nano))
-			statusCode = C.libsql_bind_string(stmt, C.int(idx), valueStr, &errMsg)
-			C.free(unsafe.Pointer(valueStr))
+			e = nBindString(stmt, idx, v.Format(time.RFC3339Nano))
 		default:
 			return nil, fmt.Errorf("unsupported type %T", arg.Value)
 		}
-		if statusCode != 0 {
-			return nil, libsqlError(fmt.Sprintf("failed to bind argument no. %d with value %v and type %T", idx, arg.Value, arg.Value), statusCode, errMsg)
+		if e != nil {
+			return nil, libsqlError(fmt.Sprintf("failed to bind argument no. %d with value %v and type %T", idx, arg.Value, arg.Value), e)
 		}
 	}
 
-	var rows C.libsql_rows_t
+	var rows rowsHandle
 	if exec {
-		statusCode = C.libsql_execute_stmt(stmt, &errMsg)
+		e = nExecuteStmt(stmt)
 	} else {
-		statusCode = C.libsql_query_stmt(stmt, &rows, &errMsg)
+		rows, e = nQueryStmt(stmt)
 	}
-	if statusCode != 0 {
-		return nil, libsqlError(fmt.Sprint("failed to execute query ", query), statusCode, errMsg)
+	if e != nil {
+		return nil, libsqlError(fmt.Sprint("failed to execute query ", query), e)
 	}
 	return rows, nil
 }
@@ -786,27 +669,24 @@ const (
 	TYPE_NULL
 )
 
-func newRows(nativePtr C.libsql_rows_t, rawText bool) (*rows, error) {
+func newRows(nativePtr rowsHandle, rawText bool) (*rows, error) {
 	if nativePtr == nil {
 		return &rows{rawText: rawText}, nil
 	}
-	columnCount := int(C.libsql_column_count(nativePtr))
+	columnCount := nColumnCount(nativePtr)
 	columns := make([]string, columnCount)
 	for i := 0; i < columnCount; i++ {
-		var ptr *C.char
-		var errMsg *C.char
-		statusCode := C.libsql_column_name(nativePtr, C.int(i), &ptr, &errMsg)
-		if statusCode != 0 {
-			return nil, libsqlError(fmt.Sprint("failed to get column name for index ", i), statusCode, errMsg)
+		name, e := nColumnName(nativePtr, i)
+		if e != nil {
+			return nil, libsqlError(fmt.Sprint("failed to get column name for index ", i), e)
 		}
-		columns[i] = C.GoString(ptr)
-		C.libsql_free_string(ptr)
+		columns[i] = name
 	}
 	return &rows{nativePtr: nativePtr, columnNames: columns, rawText: rawText}, nil
 }
 
 type rows struct {
-	nativePtr   C.libsql_rows_t
+	nativePtr   rowsHandle
 	columnNames []string
 	// rawText is connOptions.rawText of the conn that ran the query.
 	rawText bool
@@ -818,7 +698,7 @@ func (r *rows) Columns() []string {
 
 func (r *rows) Close() error {
 	if r.nativePtr != nil {
-		C.libsql_free_rows(r.nativePtr)
+		nFreeRows(r.nativePtr)
 		r.nativePtr = nil
 	}
 	return nil
@@ -828,17 +708,15 @@ func (r *rows) Next(dest []sqldriver.Value) error {
 	if r.nativePtr == nil {
 		return io.EOF
 	}
-	var row C.libsql_row_t
-	var errMsg *C.char
-	statusCode := C.libsql_next_row(r.nativePtr, &row, &errMsg)
-	if statusCode != 0 {
-		return libsqlError("failed to get next row", statusCode, errMsg)
+	row, e := nNextRow(r.nativePtr)
+	if e != nil {
+		return libsqlError("failed to get next row", e)
 	}
 	if row == nil {
 		r.Close()
 		return io.EOF
 	}
-	defer C.libsql_free_row(row)
+	defer nFreeRow(row)
 	count := len(dest)
 	if count > len(r.columnNames) {
 		count = len(r.columnNames)
@@ -846,50 +724,37 @@ func (r *rows) Next(dest []sqldriver.Value) error {
 
 Outerloop:
 	for i := 0; i < count; i++ {
-		var columnType C.int
-		var errMsg *C.char
-		statusCode := C.libsql_column_type(r.nativePtr, row, C.int(i), &columnType, &errMsg)
-		if statusCode != 0 {
-			return libsqlError(fmt.Sprint("failed to get column type for index ", i), statusCode, errMsg)
+		columnType, e := nColumnType(r.nativePtr, row, i)
+		if e != nil {
+			return libsqlError(fmt.Sprint("failed to get column type for index ", i), e)
 		}
 
-		switch int(columnType) {
+		switch columnType {
 		case TYPE_NULL:
 			dest[i] = nil
 		case TYPE_INT:
-			var value C.longlong
-			var errMsg *C.char
-			statusCode := C.libsql_get_int(row, C.int(i), &value, &errMsg)
-			if statusCode != 0 {
-				return libsqlError(fmt.Sprint("failed to get integer for column ", i), statusCode, errMsg)
+			value, e := nGetInt(row, i)
+			if e != nil {
+				return libsqlError(fmt.Sprint("failed to get integer for column ", i), e)
 			}
-			dest[i] = int64(value)
+			dest[i] = value
 		case TYPE_FLOAT:
-			var value C.double
-			var errMsg *C.char
-			statusCode := C.libsql_get_float(row, C.int(i), &value, &errMsg)
-			if statusCode != 0 {
-				return libsqlError(fmt.Sprint("failed to get float for column ", i), statusCode, errMsg)
+			value, e := nGetFloat(row, i)
+			if e != nil {
+				return libsqlError(fmt.Sprint("failed to get float for column ", i), e)
 			}
-			dest[i] = float64(value)
+			dest[i] = value
 		case TYPE_BLOB:
-			var nativeBlob C.blob
-			var errMsg *C.char
-			statusCode := C.libsql_get_blob(row, C.int(i), &nativeBlob, &errMsg)
-			if statusCode != 0 {
-				return libsqlError(fmt.Sprint("failed to get blob for column ", i), statusCode, errMsg)
+			value, e := nGetBlob(row, i)
+			if e != nil {
+				return libsqlError(fmt.Sprint("failed to get blob for column ", i), e)
 			}
-			dest[i] = C.GoBytes(unsafe.Pointer(nativeBlob.ptr), C.int(nativeBlob.len))
-			C.libsql_free_blob(nativeBlob)
+			dest[i] = value
 		case TYPE_TEXT:
-			var ptr *C.char
-			var errMsg *C.char
-			statusCode := C.libsql_get_string(row, C.int(i), &ptr, &errMsg)
-			if statusCode != 0 {
-				return libsqlError(fmt.Sprint("failed to get string for column ", i), statusCode, errMsg)
+			str, e := nGetString(row, i)
+			if e != nil {
+				return libsqlError(fmt.Sprint("failed to get string for column ", i), e)
 			}
-			str := C.GoString(ptr)
-			C.libsql_free_string(ptr)
 			if r.rawText {
 				dest[i] = str
 				continue

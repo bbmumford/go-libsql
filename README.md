@@ -39,7 +39,13 @@ Its `encrypted` step runs the tests that open keyed databases of an in-process H
 go get github.com/bbmumford/go-libsql
 ```
 
-`go-libsql` uses `CGO` to make calls to LibSQL. You must build your binaries with `CGO_ENABLED=1`.
+`go-libsql` calls libSQL's C binding. Built with cgo (`CGO_ENABLED=1`) it links the binding's static
+library for the target. Built with cgo off on darwin or linux (amd64 and arm64) it loads the same
+binding as a shared library embedded in the binary, through purego: the library is written once to
+the user's cache directory, its SHA-256 is checked again just before it is loaded
+(`ErrLibraryDigest`), and every symbol bound from it must resolve from that file and from no other
+image, such as the system's SQLite (`ErrForeignSymbol`). On any other target a cgo-free build opens
+nothing (`ErrNoLibrary`).
 
 The `database/sql` driver is registered as `libsql-cgo` (`libsql.DriverName`), so a binary can also
 link `github.com/tursodatabase/libsql-client-go`, which registers `libsql`.
@@ -110,9 +116,13 @@ Importers in the ORBTR estate:
 
 ## Platforms and build
 
-Every file needs cgo (`//go:build cgo`): build with `CGO_ENABLED=1` and a C toolchain for the
-target. The precompiled libraries cover linux amd64 and arm64, darwin amd64 and arm64, and windows
-amd64 (see Notice). The module's `go` directive is 1.20.
+Built with cgo, a C toolchain for the target links the precompiled static libraries, which cover
+linux amd64 and arm64, darwin amd64 and arm64, and windows amd64 (see Notice). Built with cgo off,
+the embedded shared libraries cover darwin and linux on amd64 and arm64
+(`lib/<goos>_<goarch>/libsql_experimental.dylib` or `.so`, built by `scripts/build-libs.sh` in the same
+cargo build as the static libraries, with the same patches; each `embed_<goos>_<goarch>.go` names
+its SHA-256). Only `native_cgo.go` and `native_purego.go` differ between the two builds, and the
+whole test suite runs in both. The module's `go` directive is 1.20.
 
 ## Licence
 
