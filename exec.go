@@ -8,7 +8,10 @@ import (
 )
 
 // ExecContext runs every statement in query, in order, on this connection and
-// stops at the first statement that fails, returning its error. It serves
+// stops at the first statement that fails, returning its error. The statements
+// are not one transaction: those before the failing one stay applied, so a
+// caller that needs a script to apply whole or not at all runs it inside a
+// transaction (BeginTx) and rolls back on the error. It serves
 // database/sql's Exec, the stmt.ExecContext of PrepareContext, and the
 // BEGIN/COMMIT/ROLLBACK of BeginTx and tx.
 //
