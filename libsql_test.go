@@ -1211,7 +1211,7 @@ func TestErrorExec(t *testing.T) {
 			t.Fatal("expected error")
 		}
 		// Local Exec runs through libsql_query (conn.execLocal), whose failure status is 1.
-		if err.Error() != "failed to execute query CREATE TABLES test (id INTEGER, name TEXT)\nerror code = 1: Error executing statement: SQLite failure: `near \"TABLES\": syntax error`" {
+		if err.Error() != "failed to execute "+statementLabel("CREATE TABLES test (id INTEGER, name TEXT)")+"\nerror code = 1: Error executing statement: SQLite failure: `near \"TABLES\": syntax error`" {
 			t.Fatal("unexpected error:", err)
 		}
 	})
@@ -1283,7 +1283,7 @@ func TestErrorQuery(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error")
 		}
-		if err.Error() != "failed to execute query SELECT NULL, id, name, gpa, cv FROM test\nerror code = 1: Error executing statement: SQLite failure: `no such table: test`" {
+		if err.Error() != "failed to execute "+statementLabel("SELECT NULL, id, name, gpa, cv FROM test")+"\nerror code = 1: Error executing statement: SQLite failure: `no such table: test`" {
 			t.Fatal("unexpected error:", err)
 		}
 	})

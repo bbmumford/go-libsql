@@ -83,7 +83,7 @@ func (c *conn) execLocal(query string, args []sqldriver.NamedValue) (sqldriver.R
 		for {
 			row, e := nNextRow(rows)
 			if e != nil {
-				return nil, libsqlError(fmt.Sprint("failed to execute query ", query), e)
+				return nil, libsqlError("failed to execute "+statementLabel(query), e)
 			}
 			if row == nil {
 				break

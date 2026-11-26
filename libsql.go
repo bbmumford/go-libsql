@@ -528,7 +528,7 @@ func (c *conn) executeNoArgs(query string, exec bool) (rowsHandle, error) {
 		rows, e = nQuery(c.nativePtr, query)
 	}
 	if e != nil {
-		return nil, libsqlError(fmt.Sprint("failed to execute query ", query), e)
+		return nil, libsqlError("failed to execute "+statementLabel(query), e)
 	}
 	return rows, nil
 }
@@ -547,7 +547,7 @@ func (c *conn) execute(query string, args []sqldriver.NamedValue, exec bool) (ro
 	}
 	stmt, e := nPrepare(c.nativePtr, query)
 	if e != nil {
-		return nil, libsqlError(fmt.Sprint("failed to prepare query ", query), e)
+		return nil, libsqlError("failed to prepare "+statementLabel(query), e)
 	}
 	defer nFreeStmt(stmt)
 
@@ -588,7 +588,7 @@ func (c *conn) execute(query string, args []sqldriver.NamedValue, exec bool) (ro
 		rows, e = nQueryStmt(stmt)
 	}
 	if e != nil {
-		return nil, libsqlError(fmt.Sprint("failed to execute query ", query), e)
+		return nil, libsqlError("failed to execute "+statementLabel(query), e)
 	}
 	return rows, nil
 }

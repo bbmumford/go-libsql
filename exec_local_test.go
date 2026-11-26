@@ -55,7 +55,7 @@ func TestExecStepErrorLocal(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			t.Fatalf("duplicate key through Exec: err=%v", err)
 		}
-		if !strings.HasPrefix(err.Error(), "failed to execute query INSERT INTO u VALUES (1)") {
+		if !strings.HasPrefix(err.Error(), "failed to execute "+statementLabel("INSERT INTO u VALUES (1)")) {
 			t.Fatalf("error does not name the statement: %v", err)
 		}
 		if n := countRows(t, db, "u"); n != 1 {
