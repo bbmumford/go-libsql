@@ -1,0 +1,22 @@
+# The libSQL C-binding libraries under lib/ and the source they are built from:
+# libSQL at libsqlTag, which is upstream commit libsqlCommit, with the patches in
+# scripts/libsql-patches/ applied in file-name order (patchSetSHA256 is the SHA-256
+# of their bytes concatenated in that order), and the SHA-256 of every static
+# archive, every shared library and the header. scripts/build-libs.sh writes it
+# (step provenance) and checks it (step verify); TestTheLibrariesMatchTheirProvenance
+# checks it on every test run, so a library, the header or a patch that changes
+# without a rebuild that rewrites this record fails there. One "key value" or
+# "sha256 path value" per line.
+libsqlTag libsql-0.9.30
+libsqlCommit 0653c5788d77ef16a97c56ff3e9fdc11717a72d9
+patchSetSHA256 3330a6a34a5f6fec01234d58df853cca3cec321935c323176beb98e04396bf42
+sha256 lib/darwin_amd64/libsql_experimental.a 5b68506fb53e94032f98ab752792d251c0ba95283168bdd6978565b636a873fb
+sha256 lib/darwin_arm64/libsql_experimental.a db77710c7bc84a9d765c5a315621ce5e400d0c68fb4a6482be1af2547df8cd2d
+sha256 lib/linux_amd64/libsql_experimental.a a48782d8b7e07b78658e11c6d371711d43892994a1814bfb1304991814a34218
+sha256 lib/linux_arm64/libsql_experimental.a 0096528bf326c5f5cc5bbec9df87804c625a5548c442a17e9d72d2a8cf74da05
+sha256 lib/windows_amd64/libsql_experimental.a ffd990a481226001352bcd58a34b538adca8110888b9736786fc35b67278b968
+sha256 lib/darwin_amd64/libsql_experimental.dylib 18a1d5117ce1df5ce66f118501e28917d12998a903df48399d49d510e078eaaf
+sha256 lib/darwin_arm64/libsql_experimental.dylib afb8f588d739b533531034536665ec3dd7beba37ce9ddbd0b8193b0cb9628236
+sha256 lib/linux_amd64/libsql_experimental.so 94a72dd7dcf03c9b01183537e2b384b0c313412cc09b5c98381959eb38dbdcde
+sha256 lib/linux_arm64/libsql_experimental.so f8608102c96e6a35746229d34566f382a5dc3a87055ba30bf6583b0b3f5a7f70
+sha256 lib/include/libsql.h 3cfc39fca9e196253028d6057a1f8e6da6a2e9fb9a907eb7ad947c5d9a042145

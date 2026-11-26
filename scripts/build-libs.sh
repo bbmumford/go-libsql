@@ -100,12 +100,25 @@
 #     runs), and fails unless the tests ran and found each database file
 #     without the SQLite header and no file beside it holding a row.
 #
+#   - `provenance` writes lib/PROVENANCE: LIBSQL_TAG, LIBSQL_COMMIT (the
+#     upstream commit the tag names, pinned here because a tag can move), the
+#     SHA-256 of the patches concatenated in file-name order, and the SHA-256 of
+#     every static archive, every shared library and the header; `verify` fails
+#     when any of them differs from the record, and the package's
+#     TestTheLibrariesMatchTheirProvenance checks the same on every test run, so
+#     a swapped or rebuilt library, or a patch changed without a rebuild that
+#     rewrites the record, is seen in the repository. A checkout that holds
+#     LIBSQL_COMMIT must have LIBSQL_TAG at it (check_tag); an exported copy,
+#     which carries the tree but not upstream's commits, is built and recorded
+#     under the pinned commit.
+#
 # Usage:
 #   LIBSQL_SRC=/path/to/libsql scripts/build-libs.sh [step...]
-#   steps: header darwin_arm64 darwin_amd64 linux windows strip verify encrypted   (default: all)
+#   steps: header darwin_arm64 darwin_amd64 linux windows strip provenance verify encrypted   (default: all)
 set -euo pipefail
 
 LIBSQL_TAG="${LIBSQL_TAG:-libsql-0.9.30}"
+LIBSQL_COMMIT="${LIBSQL_COMMIT:-0653c5788d77ef16a97c56ff3e9fdc11717a72d9}"
 LIBSQL_SRC="${LIBSQL_SRC:?set LIBSQL_SRC to a tursodatabase/libsql checkout at $LIBSQL_TAG}"
 LIBSQL_SRC="$(cd "$LIBSQL_SRC" && pwd -P)"
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -146,6 +159,13 @@ check_tag() {
 	if [ -n "$(git -C "$LIBSQL_SRC" status --porcelain)" ]; then
 		echo "LIBSQL_SRC has local changes; build from a clean checkout" >&2
 		exit 1
+	fi
+	if git -C "$LIBSQL_SRC" cat-file -e "$LIBSQL_COMMIT^{commit}" 2>/dev/null; then
+		got="$(git -C "$LIBSQL_SRC" rev-parse "$LIBSQL_TAG^{commit}")"
+		if [ "$got" != "$LIBSQL_COMMIT" ]; then
+			echo "$LIBSQL_TAG is at $got in LIBSQL_SRC, want $LIBSQL_COMMIT" >&2
+			exit 1
+		fi
 	fi
 }
 
@@ -318,6 +338,63 @@ strip_bitcode() {
 	done
 }
 
+# recorded_libs prints every library and header lib/PROVENANCE records, in the
+# order it records them: the static archives, the shared libraries, the header.
+recorded_libs() {
+	local a
+	for a in "$REPO"/lib/*/libsql_experimental.a "$REPO"/lib/*/libsql_experimental.dylib "$REPO"/lib/*/libsql_experimental.so "$REPO"/lib/include/libsql.h; do
+		[ -f "$a" ] && echo "$a"
+	done
+}
+
+# provenance writes lib/PROVENANCE (see the conditions above) from the files
+# the build steps left under lib/.
+provenance() {
+	local a
+	{
+		echo '# The libSQL C-binding libraries under lib/ and the source they are built from:'
+		echo '# libSQL at libsqlTag, which is upstream commit libsqlCommit, with the patches in'
+		echo '# scripts/libsql-patches/ applied in file-name order (patchSetSHA256 is the SHA-256'
+		echo '# of their bytes concatenated in that order), and the SHA-256 of every static'
+		echo '# archive, every shared library and the header. scripts/build-libs.sh writes it'
+		echo '# (step provenance) and checks it (step verify); TestTheLibrariesMatchTheirProvenance'
+		echo '# checks it on every test run, so a library, the header or a patch that changes'
+		echo '# without a rebuild that rewrites this record fails there. One "key value" or'
+		echo '# "sha256 path value" per line.'
+		echo "libsqlTag $LIBSQL_TAG"
+		echo "libsqlCommit $LIBSQL_COMMIT"
+		echo "patchSetSHA256 $(cat "$REPO"/scripts/libsql-patches/*.patch | shasum -a 256 | cut -d' ' -f1)"
+		recorded_libs | while read -r a; do
+			echo "sha256 ${a#"$REPO"/} $(shasum -a 256 "$a" | cut -d' ' -f1)"
+		done
+	} > "$REPO/lib/PROVENANCE"
+}
+
+# check_provenance fails when a library, the header or the patch set differs
+# from what lib/PROVENANCE records.
+check_provenance() {
+	local fail=0 rec="$REPO/lib/PROVENANCE" a want got
+	if [ ! -f "$rec" ]; then
+		echo "FAIL lib/PROVENANCE is missing" >&2
+		return 1
+	fi
+	for a in $(recorded_libs); do
+		want="$(awk -v p="${a#"$REPO"/}" '$1 == "sha256" && $2 == p { print $3 }' "$rec")"
+		got="$(shasum -a 256 "$a" | cut -d' ' -f1)"
+		if [ "$want" != "$got" ]; then
+			echo "FAIL ${a#"$REPO"/} hashes to $got, lib/PROVENANCE records ${want:-nothing}" >&2
+			fail=1
+		fi
+	done
+	want="$(awk '$1 == "patchSetSHA256" { print $2 }' "$rec")"
+	got="$(cat "$REPO"/scripts/libsql-patches/*.patch | shasum -a 256 | cut -d' ' -f1)"
+	if [ "$want" != "$got" ]; then
+		echo "FAIL the patches hash to $got, lib/PROVENANCE records ${want:-nothing}" >&2
+		fail=1
+	fi
+	return "$fail"
+}
+
 verify() {
 	local fail=0 a n minos members coff foreign want archs matched
 	for a in "$REPO"/lib/*/libsql_experimental.a; do
@@ -405,6 +482,7 @@ verify() {
 		echo "FAIL lib/include/libsql.h differs from $LIBSQL_TAG" >&2
 		fail=1
 	fi
+	check_provenance || fail=1
 	verify_probe || fail=1
 	return "$fail"
 }
@@ -624,7 +702,7 @@ verify_encrypted() {
 }
 
 steps=("$@")
-[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows strip verify encrypted)
+[ "${#steps[@]}" -gt 0 ] || steps=(header darwin_arm64 darwin_amd64 linux windows strip provenance verify encrypted)
 check_tag
 LIBSQL_SRC="$(patched_source)"
 for s in "${steps[@]}"; do
@@ -635,6 +713,7 @@ for s in "${steps[@]}"; do
 	linux) build_linux ;;
 	windows) build_windows ;;
 	strip) strip_bitcode ;;
+	provenance) provenance ;;
 	verify) verify ;;
 	encrypted) verify_encrypted ;;
 	*)
