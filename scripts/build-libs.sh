@@ -3,7 +3,12 @@
 # lib/<goos>_<goarch>/libsql_experimental.a and lib/include/libsql.h, and,
 # from the same cargo build (the crate builds a cdylib beside its staticlib),
 # the shared libraries a build with cgo off embeds and loads (embed_*.go):
-# lib/<goos>_<goarch>/libsql_experimental.dylib or .so.
+# lib/<goos>_<goarch>/shared/libsql_experimental.dylib or .so. They sit one
+# directory below the archives because GNU ld and ld64 both take a shared
+# library over an archive of the same name in a -L directory, which would make
+# every cgo binary need the shared library at run time; a darwin library's
+# install name is set to @rpath/libsql_experimental.dylib (and the library
+# signed again ad hoc), since the linker writes its build path there.
 #
 # Consumes: a checkout of github.com/tursodatabase/libsql at LIBSQL_TAG
 # (LIBSQL_SRC); rustup, which installs the toolchain pinned by the checkout's
@@ -225,7 +230,10 @@ build_darwin() {
 	)
 	mkdir -p "$REPO/lib/$out"
 	cp "$tdir/$target/release/libsql_experimental.a" "$REPO/lib/$out/libsql_experimental.a"
-	cp "$tdir/$target/release/libsql_experimental.dylib" "$REPO/lib/$out/libsql_experimental.dylib"
+	mkdir -p "$REPO/lib/$out/shared"
+	cp "$tdir/$target/release/libsql_experimental.dylib" "$REPO/lib/$out/shared/libsql_experimental.dylib"
+	install_name_tool -id @rpath/libsql_experimental.dylib "$REPO/lib/$out/shared/libsql_experimental.dylib"
+	codesign -f -s - "$REPO/lib/$out/shared/libsql_experimental.dylib"
 	update_embed "$out" dylib
 }
 
@@ -234,7 +242,7 @@ build_darwin() {
 # with cgo off refuses any other bytes.
 update_embed() {
 	local out="$1" ext="$2" sum
-	sum=$(shasum -a 256 "$REPO/lib/$out/libsql_experimental.$ext" | cut -d' ' -f1)
+	sum=$(shasum -a 256 "$REPO/lib/$out/shared/libsql_experimental.$ext" | cut -d' ' -f1)
 	perl -pi -e "s/^(\tembeddedSHA256 += \")[0-9a-f]*\"/\${1}$sum\"/" "$REPO/embed_$out.go"
 	grep -q "embeddedSHA256  = \"$sum\"" "$REPO/embed_$out.go" || { echo "FAIL embed_$out.go does not name $sum"; return 1; }
 }
@@ -264,8 +272,9 @@ build_linux() {
 	mkdir -p "$REPO/lib/linux_arm64" "$REPO/lib/linux_amd64"
 	cp "$WORK/target-linux/release/libsql_experimental.a" "$REPO/lib/linux_arm64/"
 	cp "$WORK/target-linux/x86_64-unknown-linux-gnu/release/libsql_experimental.a" "$REPO/lib/linux_amd64/"
-	cp "$WORK/target-linux/release/libsql_experimental.so" "$REPO/lib/linux_arm64/"
-	cp "$WORK/target-linux/x86_64-unknown-linux-gnu/release/libsql_experimental.so" "$REPO/lib/linux_amd64/"
+	mkdir -p "$REPO/lib/linux_arm64/shared" "$REPO/lib/linux_amd64/shared"
+	cp "$WORK/target-linux/release/libsql_experimental.so" "$REPO/lib/linux_arm64/shared/"
+	cp "$WORK/target-linux/x86_64-unknown-linux-gnu/release/libsql_experimental.so" "$REPO/lib/linux_amd64/shared/"
 	update_embed linux_arm64 so
 	update_embed linux_amd64 so
 }
@@ -342,7 +351,7 @@ strip_bitcode() {
 # order it records them: the static archives, the shared libraries, the header.
 recorded_libs() {
 	local a
-	for a in "$REPO"/lib/*/libsql_experimental.a "$REPO"/lib/*/libsql_experimental.dylib "$REPO"/lib/*/libsql_experimental.so "$REPO"/lib/include/libsql.h; do
+	for a in "$REPO"/lib/*/libsql_experimental.a "$REPO"/lib/*/shared/libsql_experimental.dylib "$REPO"/lib/*/shared/libsql_experimental.so "$REPO"/lib/include/libsql.h; do
 		[ -f "$a" ] && echo "$a"
 	done
 }
@@ -397,6 +406,23 @@ check_provenance() {
 
 verify() {
 	local fail=0 a n minos members coff foreign want archs matched
+	for a in "$REPO"/lib/*/libsql_experimental.so "$REPO"/lib/*/libsql_experimental.dylib "$REPO"/lib/*/libsql_experimental.dll; do
+		if [ -e "$a" ]; then
+			echo "FAIL $a: a shared library beside the archive, which the cgo build would link instead" >&2
+			fail=1
+		fi
+	done
+	for a in "$REPO"/lib/*/shared/libsql_experimental.*; do
+		for p in "$LIBSQL_SRC" "$CARGO_HOME_DIR" "$WORK" "$HOME" /private/tmp /Users/ /home/; do
+			# grep -a reads the whole file, Mach-O load commands included,
+			# where the install name sits outside every section strings reads.
+			n="$(LC_ALL=C grep -a -c -F "$p" "$a" || true)"
+			if [ "$n" != 0 ]; then
+				echo "FAIL $a: $n lines contain $p" >&2
+				fail=1
+			fi
+		done
+	done
 	for a in "$REPO"/lib/*/libsql_experimental.a; do
 		for p in "$LIBSQL_SRC" "$CARGO_HOME_DIR" "$WORK" "$HOME" /private/tmp; do
 			n="$(strings -a "$a" | grep -c -F "$p" || true)"

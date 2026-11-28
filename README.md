@@ -119,7 +119,8 @@ Importers in the ORBTR estate:
 Built with cgo, a C toolchain for the target links the precompiled static libraries, which cover
 linux amd64 and arm64, darwin amd64 and arm64, and windows amd64 (see Notice). Built with cgo off,
 the embedded shared libraries cover darwin and linux on amd64 and arm64
-(`lib/<goos>_<goarch>/libsql_experimental.dylib` or `.so`, built by `scripts/build-libs.sh` in the same
+(`lib/<goos>_<goarch>/shared/libsql_experimental.dylib` or `.so`, one directory below the archives so
+the cgo build's `-L` never finds them, built by `scripts/build-libs.sh` in the same
 cargo build as the static libraries, with the same patches; each `embed_<goos>_<goarch>.go` names
 its SHA-256). Only `native_cgo.go` and `native_purego.go` differ between the two builds, and the
 whole test suite runs in both. The module's `go` directive is 1.20.

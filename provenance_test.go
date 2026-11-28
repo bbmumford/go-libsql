@@ -61,8 +61,8 @@ func TestTheLibrariesMatchTheirProvenance(t *testing.T) {
 		return hex.EncodeToString(s[:])
 	}
 	var archives []string
-	for _, pattern := range []string{"libsql_experimental.a", "libsql_experimental.dylib", "libsql_experimental.so"} {
-		found, err := filepath.Glob(filepath.Join("lib", "*", pattern))
+	for _, pattern := range []string{"*/libsql_experimental.a", "*/shared/libsql_experimental.dylib", "*/shared/libsql_experimental.so"} {
+		found, err := filepath.Glob(filepath.Join("lib", pattern))
 		if err != nil {
 			t.Fatal(err)
 		}

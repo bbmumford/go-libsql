@@ -6,9 +6,10 @@ import _ "embed"
 
 // embeddedLibrary is libSQL's C binding built as a shared library for
 // linux/amd64, from the same source and patches as
-// lib/linux_amd64/libsql_experimental.a.
+// lib/linux_amd64/libsql_experimental.a. It sits in a directory of its own, which
+// the cgo build's -L does not search, so the cgo build links the archive.
 //
-//go:embed lib/linux_amd64/libsql_experimental.so
+//go:embed lib/linux_amd64/shared/libsql_experimental.so
 var embeddedLibrary []byte
 
 const (
