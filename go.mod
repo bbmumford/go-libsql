@@ -1,6 +1,6 @@
 module github.com/bbmumford/go-libsql
 
-go 1.20
+go 1.27.4
 
 require (
 	github.com/antlr4-go/antlr/v4 v4.13.0
